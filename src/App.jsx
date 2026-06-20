@@ -1,433 +1,733 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 
-// ─────────────────────────────────────────────────────────────
-// LIVE DATA — paste URL publish-to-web CSV tab 90_EXPORT_DASHBOARD
-// ─────────────────────────────────────────────────────────────
-const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSxeXQjctXiL9WBqxDHgb4GtMIcUgw2OkoD6xZFwkrfLhvUMAA-hUPTP5D8mrqMjNwAmowpkfzmtk19/pub?gid=1965086356&single=true&output=csv"; // <-- paste URL CSV di sini
+/* =====================================================================
+   KONFIGURASI — ganti bagian ini sesuai aset kamu
+   ===================================================================== */
 
-// Foto PM (kamu) — paste URL foto langsung di sini
-const FOTO_PM = "https://drive.google.com/uc?export=view&id=1hHXUbp27jvg9fK05zYIlMneHAs1zAf7M"; // contoh: "https://i.imgur.com/xxxx.jpg"
+// URL CSV hasil "Publish to web" dari tab 90_EXPORT_DASHBOARD.
+// Pakai URL publish yang sudah kamu pakai sekarang.
+const CSV_URL =
+  "https://docs.google.com/spreadsheets/d/e/2PACX-1vSxeXQjctXiL9WBqxDHgb4GtMIcUgw2OkoD6xZFwkrfLhvUMAA-hUPTP5D8mrqMjNwAmowpkfzmtk19/pub?gid=1965086356&single=true&output=csv";
 
-const NAVY = "#16335c", NAVY2 = "#1f4576", INK = "#0f1d33";
-const progColor = { DBE:"#2563eb", MMBA:"#7c3aed", SIC:"#0891b2", DBS:"#ea580c", Brevet:"#16a34a", CCC:"#64748b", All:"#16335c" };
+// Foto besar di header (foto scoreboard PM / tim). Kosongkan ("") kalau belum ada.
+// Pakai format thumbnail (bukan uc?export=view) supaya tidak diblokir sebagai background CSS.
+const HERO_IMAGE =
+  "https://drive.google.com/thumbnail?id=1hHXUbp27jvg9fK05zYIlMneHAs1zAf7M&sz=w1600";
+
+// Meta per program: warna + foto "pelari" yang jalan di ujung bar Papan Performa.
+// Kalau avatar kosong, otomatis pakai badge inisial berwarna.
+const PROGRAM_META = {
+  DBE:    { color: "#2D6CDF", avatar: "https://drive.google.com/thumbnail?id=1MywpZ8s01M24c47m-jxeAHXqqhwtXCha&sz=w400" },
+  MMBA:   { color: "#E8A317", avatar: "https://drive.google.com/thumbnail?id=1iSw_kPDCJSxWNLlYTfN25yrjc_azJVzX&sz=w400" },
+  SIC:    { color: "#0E9F8E", avatar: "https://drive.google.com/thumbnail?id=183tPBw1vjeCzfeOICJ6RuwDyyh0q9jS7&sz=w400" },
+  DBS:    { color: "#8B5CF6", avatar: "https://drive.google.com/thumbnail?id=12yZvrjALqe2hhV3y7n94je6eyjhQkKXg&sz=w400" },
+  Brevet: { color: "#E5484D", avatar: "https://drive.google.com/thumbnail?id=1-hyWkWmrERA4cGR2p-yL67Gdr2Xz7C2U&sz=w400" },
+  CCC:    { color: "#64748B", avatar: "" },
+};
+const metaOf = (p) => PROGRAM_META[p] || { color: "#94A3B8", avatar: "" };
+
+/* =====================================================================
+   PARSER CSV (tanpa library) + helper angka
+   ===================================================================== */
 
 function parseCSV(text) {
-  return text.split(/\r?\n/).map(r => {
-    const out=[]; let cur=""; let q=false;
-    for (let i=0;i<r.length;i++){ const ch=r[i];
-      if(ch==='"'){q=!q;continue;}
-      if(ch===',' && !q){out.push(cur);cur="";continue;}
-      cur+=ch; }
-    out.push(cur); return out;
-  });
-}
-function num(v){
-  let s = String(v).trim().replace(/%/g,"");
-  s = s.replace(/\./g,"").replace(/,/g,".");   // titik=ribuan dihapus, koma=desimal jadi titik
-  s = s.replace(/[^0-9.\-]/g,"");
-  const n = parseFloat(s);
-  return isNaN(n)?0:n;
-}
-function pctNum(v){
-  const hasPct = String(v).includes("%");
-  const n = num(v);
-  return hasPct ? n/100 : n;
-}
-function findSection(rows, label) {
-  const idx = rows.findIndex(r => (r[0]||"").trim() === label);
-  if (idx === -1) return [];
-  const out = [];
-  const stops = ["Header","PERFORMA_TIM","PAPAN_PERFORMA","KALDIK_EVENTS","CASHFLOW","CASHFLOW_BULAN","RAPOT_INDEKS","TOP_COMMITMENT","PESERTA_AKTIF_RINGKAS","FOTO_TIM"];
-  for (let i=idx+2;i<rows.length;i++){
-    const r=rows[i]||[];
-    if(stops.includes((r[0]||"").trim())) break;
-    if(!r[0] && !r[1] && !r[2]) break;
-    out.push(r);
+  const rows = [];
+  let row = [], cell = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { cell += '"'; i++; }
+        else q = false;
+      } else cell += c;
+    } else {
+      if (c === '"') q = true;
+      else if (c === ",") { row.push(cell); cell = ""; }
+      else if (c === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; }
+      else if (c === "\r") { /* skip */ }
+      else cell += c;
+    }
   }
-  return out;
+  if (cell.length || row.length) { row.push(cell); rows.push(row); }
+  return rows;
 }
-function kv(rows, label, key){ const r=rows.find(x=>(x[0]||"")===label && (x[1]||"")===key); return r?r[2]:""; }
 
-function buildData(text) {
-  const rows = parseCSV(text);
-  const perf = findSection(rows,"PERFORMA_TIM").filter(r=>r[0]);
-  const papan = findSection(rows,"PAPAN_PERFORMA").filter(r=>r[0]);
-  const kaldikR = findSection(rows,"KALDIK_EVENTS").filter(r=>r[0]&&num(r[0])>0);
-  const cashB = findSection(rows,"CASHFLOW_BULAN").filter(r=>r[0]);
-  const topC = findSection(rows,"TOP_COMMITMENT").filter(r=>r[0]);
-  const aktif = findSection(rows,"PESERTA_AKTIF_RINGKAS").filter(r=>r[0]);
-  const foto = findSection(rows,"FOTO_TIM").filter(r=>r[0]);
-  const fotoMap = Object.fromEntries(foto.map(r=>[r[0], r[1]]));
+// Bersihkan angka: buang "Rp", spasi, pemisah ribuan; aman utk locale.
+function num(v) {
+  if (v == null || v === "") return 0;
+  const s = String(v).trim().replace(/[^0-9.,-]/g, "");
+  // kalau ada koma & titik -> anggap titik ribuan, koma desimal (locale ID)
+  let clean = s;
+  if (s.includes(",") && s.includes(".")) clean = s.replace(/\./g, "").replace(",", ".");
+  else if (s.includes(",") && !s.includes(".")) clean = s.replace(",", ".");
+  const n = parseFloat(clean);
+  return isNaN(n) ? 0 : n;
+}
+const pct = (x) => `${Math.round(num(x) * 100)}%`;
+const rupiah = (x) =>
+  "Rp " + Math.round(num(x)).toLocaleString("id-ID");
+const truthy = (v) => /^(true|ya|yes|1|done|selesai)$/i.test(String(v).trim());
 
-  const performaTim = perf.map(r=>({
-    program:r[0], aktifT:num(r[1]), aktifR:num(r[2]), duT:num(r[3]), duR:num(r[4]),
-    djT:num(r[5]), djR:num(r[6]), biayaT:num(r[7]), biayaR:num(r[8]),
-    sis:pctNum(r[9]), rapot:pctNum(r[10]), kaldik:pctNum(r[11]),
-    skor:pctNum(r[12]), status:(r[13]||"-").trim(),
-  }));
+const SECTIONS = [
+  "PERFORMA_TIM", "PAPAN_PERFORMA", "KALDIK_EVENTS",
+  "CASHFLOW_BULAN", "TOP_COMMITMENT", "PESERTA_AKTIF_RINGKASAN",
+  "WEEKLY_LEADER",
+];
 
-  const papanDU=[], papanDJ=[];
-  papan.forEach(r=>{ const o={program:r[0],pct:pctNum(r[2])};
-    if((r[1]||"").includes("Ulang")) papanDU.push(o); else papanDJ.push(o); });
+function shapeData(rows) {
+  const meta = {};
+  const buckets = {};
+  let section = null, sub = null;
 
-  const kaldikEvents = kaldikR.map(r=>({ tgl:num(r[0]), prog:(r[1]||"").trim(), judul:r[2], done:String(r[3]).toUpperCase()==="TRUE" }));
+  for (const r of rows) {
+    const a = (r[0] || "").trim();
+    if (SECTIONS.includes(a)) { section = a; sub = null; buckets[a] = []; continue; }
+    if (a === "Header") { meta[(r[1] || "").trim()] = (r[2] || "").trim(); continue; }
+    if (!section) continue;
+    if (!sub) { sub = r.map((x) => (x || "").trim()); continue; } // baris sub-header
+    if (r.every((x) => !x || !String(x).trim())) continue;        // baris kosong
+    const obj = {};
+    sub.forEach((key, idx) => { if (key) obj[key] = r[idx]; });
+    buckets[section].push(obj);
+  }
 
-  const cashPlan = num(cashB.find(r=>(r[0]||"").toLowerCase().includes("plan"))?.[1]);
-  const cashReal = num(cashB.find(r=>(r[0]||"").toLowerCase().includes("real"))?.[1]);
-
-  const komitmen = topC.map(r=>({ judul:r[0], status:r[1], deadline:r[2] })).slice(0,5);
-
-  const pesertaAktif = aktif.map(r=>({
-    batch:r[0], program:r[1], target:num(r[2]), aktif:num(r[3]),
-    mundur:num(r[4]), bayar:num(r[5]), belumBayar:num(r[6]), bayarPct:pctNum(r[7]),
-  }));
-
-  const aktifPrograms = performaTim.filter(p=>p.status!=="-"&&p.status!=="");
   return {
-    periode: kv(rows,"Header","Periode")||"—",
-    pm: kv(rows,"Header","PM")||"—",
-    performaTim, fotoMap,
-    ringkasan: {
-      jumlahProgram: aktifPrograms.length,
-      cashPlan, cashReal, cashVariance: cashPlan-cashReal,
-      performaRata: aktifPrograms.length? aktifPrograms.reduce((a,p)=>a+p.skor,0)/aktifPrograms.length : 0,
-      kaldikDone: kaldikEvents.filter(e=>e.done).length, kaldikTotal: Math.max(1,kaldikEvents.length),
-      sisRata: aktifPrograms.length? aktifPrograms.reduce((a,p)=>a+p.sis,0)/aktifPrograms.length : 0,
-    },
-    papanDU, papanDJ, kaldikEvents, komitmen, pesertaAktif,
+    periode: meta["Periode"] || "",
+    pm: meta["PM"] || "",
+    performaTim: buckets["PERFORMA_TIM"] || [],
+    papan: buckets["PAPAN_PERFORMA"] || [],
+    kaldik: buckets["KALDIK_EVENTS"] || [],
+    cashflow: buckets["CASHFLOW_BULAN"] || [],
+    commitment: buckets["TOP_COMMITMENT"] || [],
+    pesertaAktif: buckets["PESERTA_AKTIF_RINGKASAN"] || [],
+    weekly: buckets["WEEKLY_LEADER"] || [],
   };
 }
 
-function useData(){
-  const [data,setData]=useState(null);
-  const [status,setStatus]=useState(CSV_URL?"loading":"sample");
-  useEffect(()=>{ if(!CSV_URL){ setData(SAMPLE); return; }
-    fetch(CSV_URL).then(r=>r.text()).then(t=>{ setData(buildData(t)); setStatus("live"); })
-      .catch(()=>{ setData(SAMPLE); setStatus("error"); });
-  },[]);
-  return { data, status };
+/* =====================================================================
+   DATA CONTOH (fallback) — hanya tampil saat CSV gagal di-fetch (preview).
+   Saat dideploy dengan CSV_URL benar, data live otomatis menimpa ini.
+   ===================================================================== */
+const SAMPLE = {
+  periode: "Juni 2026", pm: "Ghina",
+  performaTim: [
+    { Program:"DBE",DUT:17,DUR:3,UjianT:28,UjianR:6,BiayaT:93000000,BiayaR:69546188,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.49,Status:"Kritis" },
+    { Program:"MMBA",DUT:20,DUR:8,UjianT:32,UjianR:9,BiayaT:171000000,BiayaR:156430000,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.55,Status:"Aman" },
+    { Program:"SIC",DUT:17,DUR:6,UjianT:30,UjianR:5,BiayaT:92500000,BiayaR:49200000,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.41,Status:"Waspada" },
+    { Program:"DBS",DUT:13,DUR:4,UjianT:18,UjianR:3,BiayaT:32500000,BiayaR:27200000,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.46,Status:"Waspada" },
+    { Program:"Brevet",DUT:8,DUR:2,UjianT:10,UjianR:1,BiayaT:54000000,BiayaR:12250000,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.28,Status:"Kritis" },
+    { Program:"CCC",DUT:0,DUR:0,UjianT:0,UjianR:0,BiayaT:0,BiayaR:0,SIS:0,Rapot:0,Kaldik:0,Skor:0,Status:"-" },
+  ],
+  papan: [
+    { Program:"DBE",KPI:"Daftar Ujian",Pct:0.21 },{ Program:"MMBA",KPI:"Daftar Ujian",Pct:0.28 },
+    { Program:"SIC",KPI:"Daftar Ujian",Pct:0.17 },{ Program:"DBS",KPI:"Daftar Ujian",Pct:0.16 },
+    { Program:"Brevet",KPI:"Daftar Ujian",Pct:0.10 },{ Program:"CCC",KPI:"Daftar Ujian",Pct:0 },
+    { Program:"DBE",KPI:"Daftar Ulang",Pct:0.18 },{ Program:"MMBA",KPI:"Daftar Ulang",Pct:0.40 },
+    { Program:"SIC",KPI:"Daftar Ulang",Pct:0.35 },{ Program:"DBS",KPI:"Daftar Ulang",Pct:0.31 },
+    { Program:"Brevet",KPI:"Daftar Ulang",Pct:0.25 },{ Program:"CCC",KPI:"Daftar Ulang",Pct:0 },
+  ],
+  kaldik: [
+    { Tanggal:6,Program:"MMBA",Judul:"Asesmen CRA",Done:"True" },
+    { Tanggal:20,Program:"DBE",Judul:"Orientasi",Done:"False" },
+    { Tanggal:20,Program:"SIC",Judul:"Graduation",Done:"False" },
+  ],
+  cashflow: [{ Key:"Plan",Value:120000000 },{ Key:"Reality",Value:95000000 }],
+  commitment: [
+    { Judul:"Performance Tracking Board (minggu depan jadi)",Status:"URGENT",Deadline:"25/06/2026" },
+    { Judul:"Pengisian Asertif (Deadline 25 Juni)",Status:"URGENT",Deadline:"30/06/2026" },
+    { Judul:"Buat aturan reward & share ke group",Status:"URGENT",Deadline:"25/06/2026" },
+  ],
+  pesertaAktif: [
+    { Batch:"DBE-5",Program:"DBE",Target:62,Aktif:51,Mundur:1,SudahBayar:43,BelumBayar:8,BayarPct:0.69 },
+    { Batch:"MMBA-5",Program:"MMBA",Target:49,Aktif:46,Mundur:0,SudahBayar:30,BelumBayar:16,BayarPct:0.65 },
+    { Batch:"SIC-4",Program:"SIC",Target:37,Aktif:20,Mundur:0,SudahBayar:14,BelumBayar:6,BayarPct:0.70 },
+    { Batch:"DBS-3",Program:"DBS",Target:13,Aktif:12,Mundur:1,SudahBayar:9,BelumBayar:3,BayarPct:0.75 },
+    { Batch:"Brevet-2",Program:"Brevet",Target:27,Aktif:11,Mundur:0,SudahBayar:6,BelumBayar:5,BayarPct:0.22 },
+  ],
+  weekly: [
+    { Week:"W1",KPI:"Daftar Ujian",Program:"DBE",Pct:0.12 },{ Week:"W2",KPI:"Daftar Ujian",Program:"Brevet",Pct:0.15 },
+    { Week:"W3",KPI:"Daftar Ujian",Program:"DBS",Pct:0.11 },{ Week:"W4",KPI:"Daftar Ujian",Program:"DBE",Pct:0.18 },
+    { Week:"W5",KPI:"Daftar Ujian",Program:"MMBA",Pct:0.20 },
+    { Week:"W1",KPI:"Daftar Ulang",Program:"MMBA",Pct:0.10 },{ Week:"W2",KPI:"Daftar Ulang",Program:"SIC",Pct:0.14 },
+    { Week:"W3",KPI:"Daftar Ulang",Program:"DBS",Pct:0.12 },{ Week:"W4",KPI:"Daftar Ulang",Program:"MMBA",Pct:0.16 },
+    { Week:"W5",KPI:"Daftar Ulang",Program:"DBE",Pct:0.09 },
+  ],
+};
+
+/* =====================================================================
+   IKON (inline SVG, tanpa library)
+   ===================================================================== */
+const Crown = ({ size = 18, color = "#E8A317" }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={color} aria-hidden>
+    <path d="M3 7l4.5 3.2L12 4l4.5 6.2L21 7l-1.6 11H4.6L3 7z" />
+  </svg>
+);
+
+/* =====================================================================
+   KOMPONEN
+   ===================================================================== */
+
+function Avatar({ program, size = 34 }) {
+  const m = metaOf(program);
+  const [broken, setBroken] = useState(false);
+  if (m.avatar && !broken) {
+    return <img className="pm-ava" src={m.avatar} alt={program}
+      onError={() => setBroken(true)}
+      style={{ width: size, height: size, borderColor: m.color }} />;
+  }
+  return (
+    <span className="pm-ava pm-ava--init"
+      style={{ width: size, height: size, background: m.color }}>
+      {program.slice(0, 2).toUpperCase()}
+    </span>
+  );
 }
 
-const rupiah=(n)=> n>=1e9?`Rp ${(n/1e9).toFixed(2)} M`: n>=1e6?`Rp ${Math.round(n/1e6)} jt`:`Rp ${(n||0).toLocaleString("id")}`;
-const pct=(n)=>`${Math.round((n||0)*100)}%`;
-
-function StatCard({label,value,sub,tone="neutral"}){
-  const t={blue:"#eff4fb",green:"#eaf6ee",red:"#fdecec",amber:"#fdf4e3",violet:"#f1ecfb",cyan:"#e8f4f8",mint:"#eaf6f0",neutral:"#f1f4f8"};
-  const a={blue:"#2563eb",green:"#16a34a",red:"#dc2626",amber:"#d97706",violet:"#7c3aed",cyan:"#0891b2",mint:"#0d9488",neutral:"#475569"};
-  return <div style={{background:t[tone],borderRadius:16,padding:"16px 18px",border:"1px solid rgba(0,0,0,.04)"}}>
-    <div style={{fontSize:22,fontWeight:800,color:a[tone],lineHeight:1.1}}>{value}</div>
-    <div style={{fontSize:11,fontWeight:700,color:"#334155",marginTop:4,textTransform:"uppercase",letterSpacing:".04em"}}>{label}</div>
-    {sub&&<div style={{fontSize:11,color:"#64748b",marginTop:2}}>{sub}</div>}
-  </div>;
-}
-function Donut({value,size=120,stroke=14,color="#16a34a"}){
-  const r=(size-stroke)/2,circ=2*Math.PI*r; const [a,setA]=useState(0);
-  useEffect(()=>{const t=setTimeout(()=>setA(value),120);return()=>clearTimeout(t);},[value]);
-  return <svg width={size} height={size}>
-    <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#e8edf3" strokeWidth={stroke}/>
-    <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
-      strokeDasharray={circ} strokeDashoffset={circ*(1-a)} strokeLinecap="round"
-      transform={`rotate(-90 ${size/2} ${size/2})`} style={{transition:"stroke-dashoffset 1.1s cubic-bezier(.4,0,.2,1)"}}/>
-    <text x="50%" y="48%" textAnchor="middle" dominantBaseline="central" fontSize={size*0.2} fontWeight="800" fill={INK}>{Math.round(value*100)}%</text>
-  </svg>;
-}
-function statusPill(s){
-  const m={"Baik":["#dcfce7","#15803d"],"Perhatian":["#fef3c7","#b45309"],"Kritis":["#fee2e2","#b91c1c"],"-":["#f1f5f9","#94a3b8"]};
-  const [bg,fg]=m[s]||m["-"];
-  return <span style={{background:bg,color:fg,fontSize:11,fontWeight:800,padding:"4px 12px",borderRadius:999,textTransform:"uppercase"}}>{s}</span>;
-}
-function SectionTitle({eyebrow,title,note}){
-  return <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:14}}>
-    {eyebrow&&<span style={{background:NAVY,color:"#fff",width:24,height:24,borderRadius:7,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:13}}>{eyebrow}</span>}
-    <h3 style={{margin:0,fontSize:16,fontWeight:800,color:INK}}>{title}</h3>
-    {note&&<span style={{fontSize:12,color:"#94a3b8"}}>{note}</span>}
-  </div>;
-}
-
-function Overview({data}){
-  const d=data, r=d.ringkasan;
-  return <div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))",gap:12,marginBottom:16}}>
-      <StatCard tone="blue" label="Program Dimonitor" value={r.jumlahProgram} sub="program aktif"/>
-      <StatCard tone="violet" label="Rata-rata Performa" value={pct(r.performaRata)} sub="skor program"/>
-      <StatCard tone="cyan" label="Kaldik" value={`${r.kaldikDone}/${r.kaldikTotal}`} sub={`${Math.round(r.kaldikDone/r.kaldikTotal*100)}% terlaksana`}/>
-      <StatCard tone="mint" label="SIS Rata-rata" value={pct(r.sisRata)} sub="kepatuhan WHT"/>
-    </div>
-
-    <section style={card}>
-      <SectionTitle eyebrow="A" title="Performa Tim (Utama)" note="Peserta Aktif · DU · DJ · Biaya · SIS · Rapot · Kaldik"/>
-      <div style={{overflowX:"auto"}}>
-        <table style={tbl}>
-          <thead><tr>
-            <th style={thL}>Program</th>
-            <th style={th}>Aktif T</th><th style={th}>Aktif R</th>
-            <th style={th}>DU T</th><th style={th}>DU R</th>
-            <th style={th}>DJ T</th><th style={th}>DJ R</th>
-            <th style={th}>Biaya T</th><th style={th}>Biaya R</th>
-            <th style={th}>Skor</th><th style={th}>Status</th>
-          </tr></thead>
-          <tbody>
-            {d.performaTim.map((p,i)=>(
-              <tr key={p.program} style={{background:i%2?"#f8fafc":"#fff"}}>
-                <td style={tdL}><span style={{width:9,height:9,borderRadius:3,background:progColor[p.program],display:"inline-block",marginRight:8}}/>{p.program}</td>
-                <td style={td}>{p.aktifT||"—"}</td><td style={td}>{p.aktifR||"—"}</td>
-                <td style={td}>{p.duT||"—"}</td><td style={td}>{p.duR||"—"}</td>
-                <td style={td}>{p.djT||"—"}</td><td style={td}>{p.djR||"—"}</td>
-                <td style={td}>{p.biayaT?rupiah(p.biayaT):"—"}</td><td style={td}>{p.biayaR?rupiah(p.biayaR):"—"}</td>
-                <td style={{...td,fontWeight:800}}>{p.status!=="-"?pct(p.skor):"—"}</td>
-                <td style={td}>{statusPill(p.status)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section style={{...card,marginTop:16}}>
-      <SectionTitle eyebrow="P" title="Peserta Aktif — Angkatan Berjalan" note="bulan terpilih"/>
-      <div style={{overflowX:"auto"}}>
-        <table style={tbl}>
-          <thead><tr>
-            <th style={thL}>Batch</th><th style={th}>Program</th><th style={th}>Target</th>
-            <th style={th}>Aktif</th><th style={th}>Mundur</th><th style={th}>Sudah Bayar</th>
-            <th style={th}>Belum Bayar</th><th style={th}>Bayar %</th>
-          </tr></thead>
-          <tbody>
-            {d.pesertaAktif.length===0 && <tr><td style={td} colSpan={8}>Belum ada data (cek section PESERTA_AKTIF_RINGKAS di Sheet)</td></tr>}
-            {d.pesertaAktif.map((p,i)=>(
-              <tr key={p.batch} style={{background:i%2?"#f8fafc":"#fff"}}>
-                <td style={tdL}>{p.batch}</td><td style={td}>{p.program}</td><td style={td}>{p.target}</td>
-                <td style={{...td,fontWeight:700}}>{p.aktif}</td>
-                <td style={{...td,color:p.mundur>0?"#dc2626":"#334155"}}>{p.mundur}</td>
-                <td style={td}>{p.bayar}</td>
-                <td style={{...td,color:p.belumBayar>0?"#d97706":"#334155"}}>{p.belumBayar}</td>
-                <td style={{...td,fontWeight:700,color:p.bayarPct>=0.85?"#16a34a":p.bayarPct>=0.6?"#d97706":"#dc2626"}}>{pct(p.bayarPct)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))",gap:16,marginTop:16}}>
-      <section style={card}>
-        <SectionTitle eyebrow="B" title="Kaldik — Checklist"/>
-        <div style={{display:"flex",gap:16,alignItems:"center"}}>
-          <Donut value={r.kaldikDone/r.kaldikTotal} color="#16a34a"/>
-          <div style={{flex:1,fontSize:13}}>
-            <div style={{display:"flex",justifyContent:"space-between",padding:"3px 0"}}><span>✅ Terlaksana</span><b>{r.kaldikDone}</b></div>
-            <div style={{display:"flex",justifyContent:"space-between",padding:"3px 0"}}><span>⏳ Belum</span><b>{r.kaldikTotal-r.kaldikDone}</b></div>
-            <div style={{display:"flex",justifyContent:"space-between",padding:"3px 0",borderTop:"1px solid #eef2f7",marginTop:4}}><span>Total event</span><b>{r.kaldikTotal}</b></div>
-          </div>
-        </div>
-      </section>
-
-      <section style={card}>
-        <SectionTitle eyebrow="C" title="Efisiensi Cash Out" note="bulan terpilih"/>
-        <div style={{display:"flex",gap:10,marginBottom:10}}>
-          <div style={{flex:1,background:"#eff4fb",borderRadius:12,padding:12}}>
-            <div style={{fontSize:11,fontWeight:700,color:"#2563eb"}}>PLAN</div>
-            <div style={{fontSize:17,fontWeight:800,color:"#2563eb"}}>{rupiah(r.cashPlan)}</div>
-          </div>
-          <div style={{flex:1,background:"#fdf4e3",borderRadius:12,padding:12}}>
-            <div style={{fontSize:11,fontWeight:700,color:"#b45309"}}>REALITY</div>
-            <div style={{fontSize:17,fontWeight:800,color:"#d97706"}}>{rupiah(r.cashReal)}</div>
-          </div>
-        </div>
-        <div style={{background: r.cashVariance>=0?"#eaf6ee":"#fdecec",borderRadius:12,padding:14,textAlign:"center"}}>
-          <div style={{fontSize:11,fontWeight:700,color: r.cashVariance>=0?"#15803d":"#b91c1c"}}>VARIANCE (PLAN − REALITY)</div>
-          <div style={{fontSize:22,fontWeight:800,color: r.cashVariance>=0?"#16a34a":"#dc2626"}}>{rupiah(Math.abs(r.cashVariance))}</div>
-          <div style={{fontSize:12,color: r.cashVariance>=0?"#16a34a":"#dc2626",fontWeight:700,marginTop:2}}>
-            {r.cashVariance>=0?"✅ Berhasil jaga cash out":"⚠ Bengkak — lebihi plan"}
-          </div>
-        </div>
-      </section>
-
-      <section style={card}>
-        <SectionTitle eyebrow="E" title="Komitmen Urgent — Ghina" note="status Urgent"/>
-        {d.komitmen.length===0 && <div style={{fontSize:13,color:"#94a3b8"}}>Tidak ada komitmen urgent saat ini 🎉</div>}
-        {d.komitmen.map((k,i)=>(
-          <div key={i} style={{display:"flex",gap:10,padding:"8px 0",borderBottom:i<d.komitmen.length-1?"1px solid #f1f5f9":"none",alignItems:"flex-start"}}>
-            <span style={{background:"#fee2e2",color:"#b91c1c",fontSize:10,fontWeight:800,padding:"3px 8px",borderRadius:6,whiteSpace:"nowrap",marginTop:2}}>URGENT</span>
-            <div style={{flex:1}}>
-              <div style={{fontSize:13,fontWeight:600,color:INK}}>{k.judul}</div>
-              {k.deadline&&<div style={{fontSize:11,color:"#94a3b8"}}>🎯 {k.deadline}</div>}
-            </div>
-          </div>
-        ))}
-      </section>
-    </div>
-  </div>;
-}
-
-function PapanPerforma({data}){
-  return <div>
-    <div style={{textAlign:"center",marginBottom:20}}>
-      <h2 style={{fontSize:34,fontWeight:900,color:NAVY,margin:0,letterSpacing:"-.02em"}}>🚀 PAPAN PERFORMA</h2>
-      <div style={{color:"#64748b",fontWeight:600,marginTop:2}}>Minggu berjalan</div>
-    </div>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:20}}>
-      <RankBoard title="DAFTAR ULANG" rows={data.papanDU} accent="#7c3aed" fotoMap={data.fotoMap}/>
-      <RankBoard title="DAFTAR UJIAN" rows={data.papanDJ} accent="#0891b2" fotoMap={data.fotoMap}/>
-    </div>
-  </div>;
-}
-function RankBoard({title,rows,accent,fotoMap}){
-  const max=Math.max(...rows.map(r=>r.pct),0.01);
-  const sorted=[...rows].sort((a,b)=>b.pct-a.pct);
-  const [show,setShow]=useState(false);
-  useEffect(()=>{const t=setTimeout(()=>setShow(true),100);return()=>clearTimeout(t);},[]);
-  return <div style={{...card,padding:20}}>
-    <h3 style={{textAlign:"center",color:NAVY,fontWeight:800,marginTop:0,marginBottom:18}}>{title}</h3>
-    <div style={{display:"flex",flexDirection:"column",gap:14}}>
-      {sorted.length===0 && <div style={{textAlign:"center",color:"#94a3b8",fontSize:13}}>Belum ada data minggu ini</div>}
-      {sorted.map((r,i)=>(
-        <div key={r.program} style={{display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:82,display:"flex",alignItems:"center",gap:6,justifyContent:"flex-end"}}>
-            {fotoMap&&fotoMap[r.program] ? (
-              <img src={fotoMap[r.program]} alt={r.program} style={{width:32,height:32,borderRadius:"50%",objectFit:"cover",border:`2px solid ${accent}`}}/>
-            ) : (i===0&&<span>👑</span>)}
-            <span style={{fontWeight:700,fontSize:13,color:"#334155"}}>{r.program}</span>
-          </div>
-          <div style={{flex:1,background:"#eef2f7",borderRadius:99,height:34,position:"relative",overflow:"hidden"}}>
-            <div style={{width:show?`${Math.max(r.pct/max*100,8)}%`:"0%",height:"100%",
-              background:i===0?`linear-gradient(90deg,${accent},#a855f7)`:accent,borderRadius:99,
-              transition:`width 1.1s cubic-bezier(.34,1.2,.4,1) ${i*0.12}s`,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:12,boxSizing:"border-box"}}>
-              <span style={{color:"#fff",fontWeight:800,fontSize:13}}>{Math.round(r.pct*100)}%</span>
-            </div>
-            {i===0&&<span style={{position:"absolute",right:-2,top:-2,fontSize:18}}>🏆</span>}
-          </div>
-        </div>
-      ))}
-    </div>
-    {sorted[0]&&<div style={{textAlign:"center",marginTop:16,fontSize:12,color:"#64748b"}}>Top minggu ini: <b style={{color:accent}}>{sorted[0].program}</b> 🎉</div>}
-  </div>;
-}
-
-function KaldikView({data}){
-  const events=data.kaldikEvents;
-  const bulan=new Date().getMonth()+1, tahun=2026;
-  const first=new Date(tahun,bulan-1,1).getDay();
-  const offset=(first+6)%7;
-  const days=new Date(tahun,bulan,0).getDate();
-  const byDay={}; events.forEach(e=>{(byDay[e.tgl]=byDay[e.tgl]||[]).push(e);});
-  const cells=[...Array(offset).fill(null),...Array.from({length:days},(_,i)=>i+1)];
-  const done=events.filter(e=>e.done).length;
-  const namaBulan=["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"][bulan-1];
-  const progList=[...new Set(events.map(e=>e.prog))];
-  return <div>
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:10}}>
-      <h2 style={{fontSize:26,fontWeight:800,color:NAVY,margin:0}}>📅 Kaldik — {namaBulan} {tahun}</h2>
-      <div style={{background:"#eaf6ee",borderRadius:12,padding:"8px 16px",fontWeight:700,color:"#15803d"}}>
-        {done}/{events.length} terlaksana ({events.length?Math.round(done/events.length*100):0}%)
-      </div>
-    </div>
-    <div style={{display:"flex",gap:14,flexWrap:"wrap",marginBottom:12}}>
-      {progList.map(p=>(
-        <div key={p} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,fontWeight:600}}>
-          <span style={{width:14,height:14,borderRadius:4,background:progColor[p]||"#94a3b8"}}/>{p}
-        </div>
-      ))}
-    </div>
-    <section style={card}>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6,fontSize:12,fontWeight:700,color:"#64748b",textAlign:"center",marginBottom:6}}>
-        {["Senin","Selasa","Rabu","Kamis","Jumat","Sabtu","Minggu"].map(dd=><div key={dd}>{dd}</div>)}
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:6}}>
-        {cells.map((c,i)=>(
-          <div key={i} style={{minHeight:90,borderRadius:10,padding:6,background:c?"#f8fafc":"transparent",border:c?"1px solid #eef2f7":"none"}}>
-            {c&&<div style={{fontSize:12,fontWeight:700,color:"#94a3b8",marginBottom:3}}>{c}</div>}
-            {(byDay[c]||[]).map((e,ix)=>(
-              <div key={ix} style={{fontSize:10,background:(progColor[e.prog]||"#94a3b8")+"22",color:progColor[e.prog]||"#475569",
-                borderLeft:`4px solid ${progColor[e.prog]||"#94a3b8"}`,borderRadius:4,padding:"3px 5px",marginBottom:3,lineHeight:1.25,fontWeight:600}}>
-                <b>{e.prog}</b> {e.judul} {e.done?"✅":"⏳"}
-              </div>
-            ))}
-          </div>
-        ))}
-      </div>
-    </section>
-  </div>;
-}
-
-const card={background:"#fff",borderRadius:18,padding:20,border:"1px solid #eef2f7",boxShadow:"0 1px 3px rgba(15,29,51,.05)"};
-const tbl={width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:720};
-const th={padding:"8px 6px",color:"#64748b",fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:".03em",borderBottom:"2px solid #eef2f7",textAlign:"center"};
-const thL={...th,textAlign:"left",paddingLeft:10};
-const td={padding:"9px 6px",textAlign:"center",borderBottom:"1px solid #f1f5f9"};
-const tdL={...td,textAlign:"left",paddingLeft:10,fontWeight:700};
-
-function StatusBadge({status}){
-  const m={live:{bg:"#dcfce7",fg:"#15803d",label:"🟢 Live dari Google Sheets"},sample:{bg:"#fef3c7",fg:"#b45309",label:"🟡 Data contoh"},loading:{bg:"#e0f2fe",fg:"#0369a1",label:"⏳ Memuat..."},error:{bg:"#fee2e2",fg:"#b91c1c",label:"🔴 Gagal — pakai contoh"}};
-  const s=m[status]||m.sample;
-  return <div style={{background:s.bg,color:s.fg,fontSize:11,fontWeight:700,padding:"6px 14px",borderRadius:999,display:"inline-block"}}>{s.label}</div>;
-}
-
-export default function App(){
-  const [tab,setTab]=useState("overview");
-  const {data,status}=useData();
-  const tabs=[["overview","Overview"],["papan","Papan Performa"],["kaldik","Kaldik"]];
-  if(!data) return <div style={{padding:40,fontFamily:"system-ui"}}>⏳ Memuat dashboard...</div>;
-  return <div style={{fontFamily:"'Inter',system-ui,sans-serif",background:"#eef1f6",minHeight:"100vh",padding:"0 0 40px"}}>
-    <header style={{background:`linear-gradient(120deg,${INK},${NAVY2})`,color:"#fff",padding:"22px 28px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:14}}>
-      <div>
-        <h1 style={{margin:0,fontSize:22,fontWeight:900,letterSpacing:"-.02em"}}>PM Scoreboard — Overview Performa</h1>
-        <div style={{opacity:.8,fontSize:13,marginTop:2}}>Monitoring kinerja program di bawah pengawasan PM</div>
-      </div>
-      <div style={{display:"flex",gap:10,alignItems:"center"}}>
-        <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:"8px 16px",textAlign:"center"}}>
-          <div style={{fontSize:10,opacity:.7,textTransform:"uppercase"}}>Periode</div>
-          <div style={{fontWeight:800}}>{data.periode}</div>
-        </div>
-        <div style={{background:"rgba(255,255,255,.12)",borderRadius:12,padding:"8px 16px",display:"flex",alignItems:"center",gap:10}}>
-          {FOTO_PM ? <img src={FOTO_PM} alt="PM" style={{width:38,height:38,borderRadius:"50%",objectFit:"cover",border:"2px solid rgba(255,255,255,.5)"}}/>
-                   : <div style={{width:38,height:38,borderRadius:"50%",background:"rgba(255,255,255,.25)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18}}>👤</div>}
-          <div style={{textAlign:"left"}}>
-            <div style={{fontSize:10,opacity:.7,textTransform:"uppercase"}}>Project Manager</div>
-            <div style={{fontWeight:800}}>{data.pm}</div>
-          </div>
+function Hero({ periode, pm }) {
+  return (
+    <header className="pm-hero" style={HERO_IMAGE ? { backgroundImage: `url(${HERO_IMAGE})` } : undefined}>
+      <div className="pm-hero__scrim" />
+      <div className="pm-hero__inner">
+        <span className="pm-eyebrow">Performance Management · MCU</span>
+        <h1 className="pm-hero__title">Scoreboard Program Manager</h1>
+        <div className="pm-hero__meta">
+          <span><b>{periode || "—"}</b></span>
+          <span className="pm-dot" />
+          <span>PM&nbsp;<b>{pm || "—"}</b></span>
         </div>
       </div>
     </header>
-
-    <nav style={{display:"flex",gap:6,padding:"14px 28px 0",background:"#fff",borderBottom:"1px solid #eef2f7",position:"sticky",top:0,zIndex:5,alignItems:"center",justifyContent:"space-between",flexWrap:"wrap"}}>
-      <div style={{display:"flex",gap:6}}>
-        {tabs.map(([k,l])=>(
-          <button key={k} onClick={()=>setTab(k)} style={{border:"none",background:"none",padding:"10px 16px",fontSize:14,fontWeight:700,cursor:"pointer",color:tab===k?NAVY:"#94a3b8",borderBottom:tab===k?`3px solid ${NAVY}`:"3px solid transparent",marginBottom:-1}}>{l}</button>
-        ))}
-      </div>
-      <div style={{paddingBottom:10}}><StatusBadge status={status}/></div>
-    </nav>
-
-    <main style={{padding:"22px 28px",maxWidth:1280,margin:"0 auto"}}>
-      {tab==="overview"&&<Overview data={data}/>}
-      {tab==="papan"&&<PapanPerforma data={data}/>}
-      {tab==="kaldik"&&<KaldikView data={data}/>}
-    </main>
-
-    <footer style={{textAlign:"center",fontSize:11,color:"#94a3b8",padding:"0 28px"}}>
-      Sumber: tab 90_EXPORT_DASHBOARD (publish-to-web CSV). Refresh untuk update terbaru.
-    </footer>
-  </div>;
+  );
 }
 
-const SAMPLE = {
-  periode:"Juni 2026", pm:"Ghina", fotoMap:{},
-  performaTim:[
-    {program:"DBE",aktifT:71,aktifR:68,duT:80,duR:72,djT:120,djR:128,biayaT:800e6,biayaR:760e6,sis:0.8,rapot:0.9,kaldik:0.33,skor:0.85,status:"Baik"},
-    {program:"MMBA",aktifT:50,aktifR:48,duT:70,duR:60,djT:100,djR:95,biayaT:600e6,biayaR:550e6,sis:0.75,rapot:0.8,kaldik:0.33,skor:0.78,status:"Perhatian"},
-    {program:"SIC",aktifT:60,aktifR:58,duT:50,duR:55,djT:80,djR:90,biayaT:400e6,biayaR:380e6,sis:0.82,rapot:0.85,kaldik:0.33,skor:0.90,status:"Baik"},
-    {program:"DBS",aktifT:40,aktifR:38,duT:40,duR:45,djT:60,djR:50,biayaT:300e6,biayaR:280e6,sis:0.7,rapot:0.75,kaldik:0,skor:0.75,status:"Perhatian"},
-    {program:"Brevet",aktifT:55,aktifR:53,duT:60,duR:58,djT:90,djR:88,biayaT:350e6,biayaR:345e6,sis:0.78,rapot:0.82,kaldik:0,skor:0.83,status:"Baik"},
-    {program:"CCC",aktifT:0,aktifR:0,duT:0,duR:0,djT:0,djR:0,biayaT:0,biayaR:0,sis:0,rapot:0,kaldik:0,skor:0,status:"-"},
-  ],
-  ringkasan:{jumlahProgram:5,cashPlan:1.98e9,cashReal:1.85e9,cashVariance:0.13e9,performaRata:0.822,kaldikDone:1,kaldikTotal:3,sisRata:0.77},
-  papanDU:[{program:"Brevet",pct:1.5},{program:"DBS",pct:1.0},{program:"MMBA",pct:0.6},{program:"DBE",pct:0.4},{program:"SIC",pct:0.33}],
-  papanDJ:[{program:"MMBA",pct:0.14},{program:"DBE",pct:0.10},{program:"SIC",pct:0.08},{program:"DBS",pct:0.05},{program:"Brevet",pct:0.03}],
-  kaldikEvents:[{tgl:20,prog:"DBE",judul:"Orientasi",done:false},{tgl:5,prog:"MMBA",judul:"Asesmen CRA",done:true},{tgl:20,prog:"SIC",judul:"Graduation",done:false}],
-  komitmen:[{judul:"Finalisasi CRM MMBA",status:"Urgent",deadline:"25 Jun"},{judul:"Review cashflow DBS",status:"Urgent",deadline:"28 Jun"}],
-  pesertaAktif:[
-    {batch:"DBE-5",program:"DBE",target:71,aktif:68,mundur:3,bayar:62,belumBayar:6,bayarPct:0.87},
-    {batch:"SIC-5",program:"SIC",target:60,aktif:58,mundur:2,bayar:55,belumBayar:3,bayarPct:0.92},
-  ],
+const statusTone = (s = "") => {
+  const t = s.toLowerCase();
+  if (t.includes("kritis")) return "crit";
+  if (t.includes("waspada")) return "warn";
+  if (t.includes("aman")) return "ok";
+  return "muted";
 };
+
+/* ----- A. PERFORMA TIM (tabel dikelompokkan per kategori T/R) ----- */
+function PerformaTim({ rows }) {
+  const groups = [
+    { key: "DU", label: "Daftar Ulang", t: "DUT", r: "DUR", kind: "count" },
+    { key: "DJ", label: "Daftar Ujian", t: "UjianT", r: "UjianR", kind: "count" },
+    { key: "BY", label: "Biaya Pendidikan", t: "BiayaT", r: "BiayaR", kind: "money" },
+  ];
+  const single = [
+    { key: "SIS", label: "SIS" }, { key: "Rapot", label: "Rapot" }, { key: "Kaldik", label: "Kaldik" },
+  ];
+  const fmt = (kind, v) => kind === "money" ? rupiah(v) : Math.round(num(v));
+
+  return (
+    <Section letter="A" title="Performa Tim" caption="Target vs Realisasi per kategori">
+      <div className="pm-tablewrap">
+        <table className="pm-table">
+          <thead>
+            <tr className="pm-table__grouprow">
+              <th rowSpan={2} className="pm-sticky">Program</th>
+              {groups.map((g) => <th key={g.key} colSpan={2} className="pm-grouphd">{g.label}</th>)}
+              {single.map((s) => <th key={s.key} rowSpan={2}>{s.label}</th>)}
+              <th rowSpan={2}>Skor</th>
+              <th rowSpan={2}>Status</th>
+            </tr>
+            <tr className="pm-table__subrow">
+              {groups.map((g) => (
+                <React.Fragment key={g.key}>
+                  <th className="pm-tr">Target</th><th className="pm-tr pm-tr--real">Realisasi</th>
+                </React.Fragment>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.Program}>
+                <td className="pm-sticky pm-prog">
+                  <span className="pm-chip" style={{ background: metaOf(row.Program).color }} />
+                  {row.Program}
+                </td>
+                {groups.map((g) => (
+                  <React.Fragment key={g.key}>
+                    <td className="pm-tr">{fmt(g.kind, row[g.t])}</td>
+                    <td className="pm-tr pm-tr--real">{fmt(g.kind, row[g.r])}</td>
+                  </React.Fragment>
+                ))}
+                {single.map((s) => <td key={s.key}>{pct(row[s.key])}</td>)}
+                <td className="pm-skor">{pct(row.Skor)}</td>
+                <td><span className={`pm-badge pm-badge--${statusTone(row.Status)}`}>{row.Status || "—"}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Section>
+  );
+}
+
+/* ----- B. PESERTA AKTIF (angkatan berjalan) ----- */
+function PesertaAktif({ rows }) {
+  return (
+    <Section letter="B" title="Peserta Aktif" caption="Angkatan berjalan tiap program">
+      <div className="pm-grid pm-grid--cards">
+        {rows.map((r) => {
+          const aktif = r.Aktif === "" || r.Aktif == null ? null : num(r.Aktif);
+          const target = num(r.Target);
+          const bayar = num(r.BayarPct);
+          return (
+            <div key={r.Batch} className="pm-card">
+              <div className="pm-card__head">
+                <Avatar program={r.Program} size={30} />
+                <div>
+                  <div className="pm-card__title">{r.Batch}</div>
+                  <div className="pm-card__sub">Target {target || "—"} peserta</div>
+                </div>
+                <div className="pm-card__big">{aktif == null ? "—" : aktif}<span>aktif</span></div>
+              </div>
+              <div className="pm-bar pm-bar--thin">
+                <div className="pm-bar__fill" style={{
+                  width: `${Math.min(100, bayar * 100)}%`,
+                  background: metaOf(r.Program).color,
+                }} />
+              </div>
+              <div className="pm-card__stats">
+                <span>Sudah bayar <b>{num(r.SudahBayar)}</b></span>
+                <span>Belum <b>{num(r.BelumBayar)}</b></span>
+                <span>Mundur <b>{num(r.Mundur)}</b></span>
+                <span className="pm-card__pct">{pct(r.BayarPct)} bayar</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Section>
+  );
+}
+
+/* ----- C. KALDIK CHECKLIST ----- */
+function KaldikChecklist({ rows }) {
+  const sorted = [...rows].sort((a, b) => num(a.Tanggal) - num(b.Tanggal));
+  return (
+    <Section letter="C" title="Kaldik Checklist" caption="Agenda kalender akademik bulan ini">
+      <ul className="pm-checklist">
+        {sorted.length === 0 && <li className="pm-empty">Belum ada agenda bulan ini.</li>}
+        {sorted.map((e, i) => {
+          const done = truthy(e.Done);
+          return (
+            <li key={i} className={`pm-check ${done ? "is-done" : ""}`}>
+              <span className="pm-check__box">{done ? "✓" : ""}</span>
+              <span className="pm-check__date">{num(e.Tanggal)}</span>
+              <span className="pm-chip" style={{ background: metaOf(e.Program).color }} />
+              <span className="pm-check__prog">{e.Program}</span>
+              <span className="pm-check__title">{e.Judul}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </Section>
+  );
+}
+
+/* ----- D. EFISIENSI CASHOUT ----- */
+function CashoutEfisiensi({ rows }) {
+  const get = (k) => num((rows.find((r) => (r.Key || "").toLowerCase() === k) || {}).Value);
+  const plan = get("plan"), reality = get("reality");
+  const variance = plan - reality;
+  const eff = plan > 0 ? reality / plan : 0;
+  const over = reality > plan;
+  return (
+    <Section letter="D" title="Efisiensi Cashout" caption="Rencana vs realisasi pengeluaran">
+      <div className="pm-grid pm-grid--3">
+        <Stat label="Cash Out Plan" value={rupiah(plan)} tone="muted" />
+        <Stat label="Cash Out Reality" value={rupiah(reality)} tone={over ? "crit" : "ok"} />
+        <Stat label="Variance" value={rupiah(Math.abs(variance))}
+          tone={over ? "crit" : "ok"} hint={over ? "Over budget" : "Hemat"} />
+      </div>
+      <div className="pm-bar pm-bar--cash">
+        <div className="pm-bar__fill" style={{
+          width: `${Math.min(100, eff * 100)}%`,
+          background: over ? "#E5484D" : "#0E9F8E",
+        }} />
+        <span className="pm-bar__mid">{pct(eff)} terpakai dari plan</span>
+      </div>
+    </Section>
+  );
+}
+
+/* ----- E. KOMITMEN URGENT ----- */
+function KomitmenUrgent({ rows }) {
+  return (
+    <Section letter="E" title="Komitmen Urgent" caption="Yang harus dieksekusi paling dulu">
+      <div className="pm-urgent">
+        {rows.length === 0 && <div className="pm-empty">Tidak ada komitmen urgent. 🎉</div>}
+        {rows.map((c, i) => (
+          <div key={i} className="pm-urgent__item">
+            <span className="pm-urgent__flag">URGENT</span>
+            <span className="pm-urgent__title">{c.Judul}</span>
+            <span className="pm-urgent__due">{c.Deadline || "—"}</span>
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+/* ----- PAPAN PERFORMA (racing lanes + history mingguan) ----- */
+function PapanPerforma({ papan, weekly }) {
+  const kpis = ["Daftar Ujian", "Daftar Ulang"];
+  const [kpi, setKpi] = useState("Daftar Ujian");
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setMounted(true), 60); return () => clearTimeout(t); }, []);
+
+  const lanes = useMemo(() => {
+    const list = papan.filter((r) => (r.KPI || "").trim() === kpi)
+      .map((r) => ({ program: r.Program, pct: num(r.Pct) }))
+      .sort((a, b) => b.pct - a.pct);
+    return list;
+  }, [papan, kpi]);
+  const max = Math.max(0.0001, ...lanes.map((l) => l.pct));
+  const leader = lanes[0]?.program;
+
+  return (
+    <Section letter="" title="Papan Performa" caption="Balapan capaian antar program">
+      <div className="pm-kpitoggle">
+        {kpis.map((k) => (
+          <button key={k} className={`pm-toggle ${kpi === k ? "is-active" : ""}`}
+            onClick={() => setKpi(k)}>{k}</button>
+        ))}
+      </div>
+
+      <div className="pm-track">
+        {lanes.map((l, i) => {
+          const w = mounted ? Math.max(8, (l.pct / max) * 100) : 8;
+          const isLead = l.program === leader && l.pct > 0;
+          return (
+            <div key={l.program} className="pm-lane">
+              <div className="pm-lane__rank">{i + 1}</div>
+              <div className="pm-lane__name">{l.program}</div>
+              <div className="pm-lane__rail">
+                <div className="pm-lane__fill" style={{ width: `${w}%`, background: metaOf(l.program).color }}>
+                  <span className="pm-lane__pct">{pct(l.pct)}</span>
+                </div>
+                <div className="pm-lane__runner" style={{ left: `calc(${w}% - 17px)` }}>
+                  {isLead && <span className="pm-lane__crown"><Crown /></span>}
+                  <Avatar program={l.program} size={34} />
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {lanes.length === 0 && <div className="pm-empty">Belum ada data untuk {kpi}.</div>}
+      </div>
+
+      <WeeklyHistory weekly={weekly} />
+    </Section>
+  );
+}
+
+function WeeklyHistory({ weekly }) {
+  const build = (kpi) => {
+    const wk = weekly.filter((r) => (r.KPI || "").trim() === kpi)
+      .map((r) => ({ week: r.Week, program: r.Program, pct: num(r.Pct) }))
+      .sort((a, b) => a.week.localeCompare(b.week));
+    const tally = {};
+    wk.forEach((w) => { if (w.program) tally[w.program] = (tally[w.program] || 0) + 1; });
+    const champ = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
+    return { wk, champ };
+  };
+  const cols = [
+    { kpi: "Daftar Ujian", ...build("Daftar Ujian") },
+    { kpi: "Daftar Ulang", ...build("Daftar Ulang") },
+  ];
+  if (weekly.length === 0) {
+    return (
+      <div className="pm-weekly pm-weekly--empty">
+        <div className="pm-empty">
+          History mingguan belum tersedia. Tambahkan section <code>WEEKLY_LEADER</code> di tab
+          90_EXPORT_DASHBOARD (lihat catatan dari Claude).
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="pm-weekly">
+      <div className="pm-weekly__head">History Mingguan · Pemuncak per Minggu</div>
+      <div className="pm-weekly__cols">
+        {cols.map((c) => (
+          <div key={c.kpi} className="pm-weekly__col">
+            <div className="pm-weekly__kpi">{c.kpi}</div>
+            <ol className="pm-weekly__list">
+              {c.wk.map((w, i) => (
+                <li key={i}>
+                  <span className="pm-weekly__wk">{w.week}</span>
+                  <Avatar program={w.program} size={22} />
+                  <span className="pm-weekly__prog">{w.program}</span>
+                  <span className="pm-weekly__pct">{pct(w.pct)}</span>
+                </li>
+              ))}
+            </ol>
+            {c.champ && (
+              <div className="pm-weekly__champ">
+                <Crown size={16} />
+                <span><b>{c.champ[0]}</b> unggul {c.champ[1]}× → kandidat reward</span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ----- primitif ----- */
+function Section({ letter, title, caption, children }) {
+  return (
+    <section className="pm-section">
+      <div className="pm-section__head">
+        {letter && <span className="pm-section__letter">{letter}</span>}
+        <div>
+          <h2 className="pm-section__title">{title}</h2>
+          {caption && <p className="pm-section__caption">{caption}</p>}
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
+function Stat({ label, value, tone = "muted", hint }) {
+  return (
+    <div className={`pm-stat pm-stat--${tone}`}>
+      <div className="pm-stat__label">{label}</div>
+      <div className="pm-stat__value">{value}</div>
+      {hint && <div className="pm-stat__hint">{hint}</div>}
+    </div>
+  );
+}
+
+/* =====================================================================
+   APP
+   ===================================================================== */
+export default function App() {
+  const [data, setData] = useState(null);
+  const [tab, setTab] = useState("dashboard");
+  const [live, setLive] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    fetch(CSV_URL)
+      .then((r) => { if (!r.ok) throw new Error("fetch"); return r.text(); })
+      .then((t) => {
+        if (!t || t.includes("<html")) throw new Error("not csv");
+        const shaped = shapeData(parseCSV(t));
+        if (alive) { setData(shaped); setLive(true); }
+      })
+      .catch(() => { if (alive) setData(SAMPLE); });
+    return () => { alive = false; };
+  }, []);
+
+  if (!data) return <div className="pm-loading">Memuat scoreboard…</div>;
+
+  return (
+    <div className="pm-root">
+      <StyleTag />
+      <Hero periode={data.periode} pm={data.pm} />
+      {!live && <div className="pm-banner">Mode pratinjau (data contoh). Ganti <code>CSV_URL</code> untuk data live.</div>}
+
+      <nav className="pm-tabs">
+        <button className={tab === "dashboard" ? "is-active" : ""} onClick={() => setTab("dashboard")}>Dashboard</button>
+        <button className={tab === "papan" ? "is-active" : ""} onClick={() => setTab("papan")}>Papan Performa</button>
+      </nav>
+
+      <main className="pm-main">
+        {tab === "dashboard" ? (
+          <>
+            <PerformaTim rows={data.performaTim} />
+            <PesertaAktif rows={data.pesertaAktif} />
+            <KaldikChecklist rows={data.kaldik} />
+            <CashoutEfisiensi rows={data.cashflow} />
+            <KomitmenUrgent rows={data.commitment} />
+          </>
+        ) : (
+          <PapanPerforma papan={data.papan} weekly={data.weekly} />
+        )}
+      </main>
+
+      <footer className="pm-footer">Scoreboard PM · {data.periode} · diperbarui otomatis dari Google Sheets</footer>
+    </div>
+  );
+}
+
+/* =====================================================================
+   STYLE (di-inject sekali; plain CSS, tanpa Tailwind)
+   ===================================================================== */
+function StyleTag() {
+  return <style dangerouslySetInnerHTML={{ __html: CSS }} />;
+}
+
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@600&display=swap');
+
+.pm-root{--ink:#14213D;--ink2:#3A4663;--line:#E4E8F0;--bg:#F2F4F8;--card:#fff;
+  --gold:#E8A317;--teal:#0E9F8E;--red:#E5484D;
+  font-family:'Inter',system-ui,sans-serif;color:var(--ink);background:var(--bg);min-height:100vh;}
+*{box-sizing:border-box}
+.pm-loading{font-family:'Inter',sans-serif;padding:80px;text-align:center;color:#64748B}
+.pm-banner{max-width:1180px;margin:14px auto 0;padding:9px 16px;background:#FEF3C7;border:1px solid #FCD34D;
+  border-radius:10px;font-size:13px;color:#92400E}
+.pm-banner code,.pm-empty code{background:#fff;padding:1px 6px;border-radius:5px;font-family:'JetBrains Mono',monospace;font-size:12px}
+
+/* HERO */
+.pm-hero{position:relative;min-height:230px;background:linear-gradient(135deg,#14213D,#22386b 60%,#2D6CDF);
+  background-size:cover;background-position:center;display:flex;align-items:flex-end;overflow:hidden}
+.pm-hero__scrim{position:absolute;inset:0;background:linear-gradient(180deg,rgba(11,18,38,.25),rgba(11,18,38,.82))}
+.pm-hero__inner{position:relative;max-width:1180px;width:100%;margin:0 auto;padding:30px 24px 26px}
+.pm-eyebrow{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#9DB4E8;font-weight:600}
+.pm-hero__title{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;color:#fff;
+  font-size:clamp(28px,4.4vw,46px);margin:8px 0 10px;line-height:1.02;letter-spacing:-.02em}
+.pm-hero__meta{display:flex;align-items:center;gap:12px;color:#DDE6F7;font-size:15px}
+.pm-hero__meta b{color:#fff}
+.pm-dot{width:5px;height:5px;border-radius:50%;background:#7E97C9}
+
+/* TABS */
+.pm-tabs{max-width:1180px;margin:18px auto 0;padding:0 24px;display:flex;gap:8px}
+.pm-tabs button{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:14px;border:1px solid var(--line);
+  background:#fff;color:var(--ink2);padding:10px 20px;border-radius:11px;cursor:pointer;transition:.15s}
+.pm-tabs button:hover{border-color:#C3CCE0}
+.pm-tabs button.is-active{background:var(--ink);color:#fff;border-color:var(--ink)}
+
+.pm-main{max-width:1180px;margin:0 auto;padding:8px 24px 10px}
+
+/* SECTION */
+.pm-section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px 22px 24px;margin-top:18px;
+  box-shadow:0 1px 2px rgba(20,33,61,.04)}
+.pm-section__head{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+.pm-section__letter{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;font-size:16px;color:#fff;
+  background:var(--ink);width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:none}
+.pm-section__title{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:21px;margin:0;letter-spacing:-.01em}
+.pm-section__caption{margin:2px 0 0;font-size:13px;color:#7C879F}
+
+/* TABLE PERFORMA TIM */
+.pm-tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px}
+.pm-table{border-collapse:collapse;width:100%;font-size:13px;min-width:760px}
+.pm-table th,.pm-table td{padding:10px 12px;text-align:center;white-space:nowrap}
+.pm-table thead th{background:#F7F9FC;font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;color:var(--ink2);
+  border-bottom:1px solid var(--line)}
+.pm-table__grouprow .pm-grouphd{border-left:1px solid var(--line);border-bottom:1px solid var(--line);color:var(--ink)}
+.pm-table__subrow th{font-size:11px;font-weight:600;color:#8A93A8;padding-top:6px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.pm-tr{border-left:1px solid var(--line)}
+.pm-tr--real{font-weight:700;color:var(--ink)}
+.pm-table tbody td{border-bottom:1px solid #EEF1F6;font-variant-numeric:tabular-nums}
+.pm-table tbody tr:last-child td{border-bottom:none}
+.pm-table tbody tr:hover td{background:#FAFBFE}
+.pm-sticky{position:sticky;left:0;background:#fff;text-align:left;z-index:1}
+.pm-table thead .pm-sticky{background:#F7F9FC}
+.pm-prog{font-weight:700;display:flex;align-items:center;gap:8px}
+.pm-chip{width:10px;height:10px;border-radius:3px;flex:none;display:inline-block}
+.pm-skor{font-weight:800;font-family:'Plus Jakarta Sans',sans-serif}
+.pm-badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;letter-spacing:.02em}
+.pm-badge--crit{background:#FDECEC;color:#C0392B}
+.pm-badge--warn{background:#FEF6E7;color:#B7791F}
+.pm-badge--ok{background:#E7F6F1;color:#0B7A66}
+.pm-badge--muted{background:#EEF1F6;color:#7C879F}
+
+/* CARDS / GRID */
+.pm-grid{display:grid;gap:14px}
+.pm-grid--cards{grid-template-columns:repeat(auto-fill,minmax(250px,1fr))}
+.pm-grid--3{grid-template-columns:repeat(3,1fr)}
+.pm-card{border:1px solid var(--line);border-radius:14px;padding:15px}
+.pm-card__head{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.pm-card__title{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:15px}
+.pm-card__sub{font-size:12px;color:#8A93A8}
+.pm-card__big{margin-left:auto;font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;font-size:26px;line-height:1;text-align:right}
+.pm-card__big span{display:block;font-size:10px;font-weight:600;color:#8A93A8;letter-spacing:.05em;text-transform:uppercase}
+.pm-card__stats{display:flex;flex-wrap:wrap;gap:6px 14px;margin-top:11px;font-size:12px;color:var(--ink2)}
+.pm-card__stats b{color:var(--ink)}
+.pm-card__pct{margin-left:auto;font-weight:700}
+
+/* BARS */
+.pm-bar{position:relative;background:#EEF1F6;border-radius:20px;overflow:hidden}
+.pm-bar--thin{height:7px;margin-top:4px}
+.pm-bar--cash{height:30px;margin-top:14px}
+.pm-bar__fill{height:100%;border-radius:20px;transition:width .9s cubic-bezier(.22,1,.36,1)}
+.pm-bar__mid{position:absolute;inset:0;display:grid;place-items:center;font-size:12px;font-weight:700;color:var(--ink)}
+
+/* STAT */
+.pm-stat{border:1px solid var(--line);border-radius:14px;padding:15px 16px}
+.pm-stat__label{font-size:12px;color:#8A93A8;font-weight:600}
+.pm-stat__value{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;font-size:22px;margin-top:5px;font-variant-numeric:tabular-nums}
+.pm-stat__hint{font-size:11px;font-weight:700;margin-top:3px}
+.pm-stat--crit .pm-stat__value,.pm-stat--crit .pm-stat__hint{color:var(--red)}
+.pm-stat--ok .pm-stat__value,.pm-stat--ok .pm-stat__hint{color:var(--teal)}
+
+/* CHECKLIST */
+.pm-checklist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.pm-check{display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:11px;padding:10px 13px;font-size:14px}
+.pm-check.is-done{background:#F6FBF9;border-color:#CDEBE2}
+.pm-check__box{width:21px;height:21px;border-radius:6px;border:1.5px solid #CBD4E3;display:grid;place-items:center;
+  color:#fff;font-size:13px;font-weight:800;flex:none}
+.pm-check.is-done .pm-check__box{background:var(--teal);border-color:var(--teal)}
+.pm-check__date{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;width:26px;text-align:center}
+.pm-check__prog{font-weight:700;font-size:13px}
+.pm-check__title{color:var(--ink2)}
+.pm-check.is-done .pm-check__title{text-decoration:line-through;color:#9AA4B8}
+
+/* URGENT */
+.pm-urgent{display:flex;flex-direction:column;gap:9px}
+.pm-urgent__item{display:flex;align-items:center;gap:13px;border:1px solid #F3D2D2;background:#FEF7F7;border-radius:11px;padding:11px 14px}
+.pm-urgent__flag{font-size:10px;font-weight:800;letter-spacing:.06em;color:#fff;background:var(--red);padding:4px 9px;border-radius:6px;flex:none}
+.pm-urgent__title{font-weight:600;font-size:14px}
+.pm-urgent__due{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:12px;color:#C0392B;flex:none}
+
+/* PAPAN PERFORMA */
+.pm-kpitoggle{display:flex;gap:8px;margin-bottom:20px}
+.pm-toggle{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:13px;border:1px solid var(--line);
+  background:#fff;color:var(--ink2);padding:8px 16px;border-radius:9px;cursor:pointer}
+.pm-toggle.is-active{background:var(--ink);color:#fff;border-color:var(--ink)}
+.pm-track{display:flex;flex-direction:column;gap:16px;padding:8px 0 4px}
+.pm-lane{display:flex;align-items:center;gap:12px}
+.pm-lane__rank{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;color:#B6C0D4;width:18px;text-align:center;flex:none}
+.pm-lane__name{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;width:64px;flex:none;font-size:14px}
+.pm-lane__rail{position:relative;flex:1;height:40px;background:#EEF1F6;border-radius:22px;
+  background-image:repeating-linear-gradient(90deg,transparent,transparent 58px,#E1E6F0 58px,#E1E6F0 60px)}
+.pm-lane__fill{position:absolute;left:0;top:0;height:100%;border-radius:22px;display:flex;align-items:center;
+  transition:width 1s cubic-bezier(.22,1,.36,1);min-width:40px}
+.pm-lane__pct{position:absolute;left:50%;transform:translateX(-50%);font-weight:800;font-size:13px;color:#fff;
+  font-family:'Plus Jakarta Sans',sans-serif;text-shadow:0 1px 2px rgba(0,0,0,.25);white-space:nowrap}
+.pm-lane__runner{position:absolute;top:50%;transform:translateY(-50%);transition:left 1s cubic-bezier(.22,1,.36,1);
+  display:flex;flex-direction:column;align-items:center}
+.pm-lane__crown{position:absolute;top:-15px;animation:pm-bob 1.6s ease-in-out infinite}
+@keyframes pm-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+
+/* WEEKLY HISTORY */
+.pm-weekly{margin-top:26px;border-top:1px dashed var(--line);padding-top:20px}
+.pm-weekly--empty{border-top:1px dashed var(--line)}
+.pm-weekly__head{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:15px;margin-bottom:14px}
+.pm-weekly__cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pm-weekly__col{border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.pm-weekly__kpi{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:14px;margin-bottom:10px;color:var(--ink)}
+.pm-weekly__list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:7px}
+.pm-weekly__list li{display:flex;align-items:center;gap:9px;font-size:13px}
+.pm-weekly__wk{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:12px;color:#8A93A8;width:26px}
+.pm-weekly__prog{font-weight:600}
+.pm-weekly__pct{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink2);font-weight:600}
+.pm-weekly__champ{display:flex;align-items:center;gap:8px;margin-top:12px;padding-top:11px;border-top:1px solid #EEF1F6;
+  font-size:13px;color:#92400E;background:linear-gradient(0deg,#FFFBF0,#fff);}
+.pm-weekly__champ b{color:var(--ink)}
+
+/* AVATAR */
+.pm-ava{border-radius:50%;object-fit:cover;border:2px solid #fff;box-shadow:0 1px 4px rgba(20,33,61,.2)}
+.pm-ava--init{display:grid;place-items:center;color:#fff;font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;
+  font-size:11px;border:2px solid #fff}
+.pm-empty{color:#8A93A8;font-size:13px;padding:10px 2px}
+.pm-footer{max-width:1180px;margin:8px auto 0;padding:20px 24px 36px;color:#9AA4B8;font-size:12px;text-align:center}
+
+@media(max-width:720px){
+  .pm-grid--3{grid-template-columns:1fr}
+  .pm-weekly__cols{grid-template-columns:1fr}
+  .pm-lane__name{width:50px;font-size:12px}
+}
+@media(prefers-reduced-motion:reduce){
+  .pm-bar__fill,.pm-lane__fill,.pm-lane__runner{transition:none}
+  .pm-lane__crown{animation:none}
+}
+`;
