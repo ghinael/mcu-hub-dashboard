@@ -1,21 +1,18 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 
 /* =====================================================================
-   KONFIGURASI — ganti bagian ini sesuai aset kamu
+   KONFIGURASI
    ===================================================================== */
 
-// URL CSV hasil "Publish to web" dari tab 90_EXPORT_DASHBOARD.
-// Pakai URL publish yang sudah kamu pakai sekarang.
+// URL CSV publish dari tab 90_EXPORT_DASHBOARD.
+// HARUS format publish-to-web: .../pub?...&output=csv
+// BUKAN URL edit (.../edit?gid=...). Cara dapat: File → Bagikan → Publish ke web → pilih tab 90 → format CSV.
 const CSV_URL =
   "https://docs.google.com/spreadsheets/d/e/2PACX-1vSxeXQjctXiL9WBqxDHgb4GtMIcUgw2OkoD6xZFwkrfLhvUMAA-hUPTP5D8mrqMjNwAmowpkfzmtk19/pub?gid=1965086356&single=true&output=csv";
 
-// Foto besar di header (foto scoreboard PM / tim). Kosongkan ("") kalau belum ada.
-// Pakai format thumbnail (bukan uc?export=view) supaya tidak diblokir sebagai background CSS.
 const HERO_IMAGE =
   "https://drive.google.com/thumbnail?id=1hHXUbp27jvg9fK05zYIlMneHAs1zAf7M&sz=w1600";
 
-// Meta per program: warna + foto "pelari" yang jalan di ujung bar Papan Performa.
-// Kalau avatar kosong, otomatis pakai badge inisial berwarna.
 const PROGRAM_META = {
   DBE:    { color: "#2D6CDF", avatar: "https://drive.google.com/thumbnail?id=1MywpZ8s01M24c47m-jxeAHXqqhwtXCha&sz=w400" },
   MMBA:   { color: "#E8A317", avatar: "https://drive.google.com/thumbnail?id=1iSw_kPDCJSxWNLlYTfN25yrjc_azJVzX&sz=w400" },
@@ -27,7 +24,7 @@ const PROGRAM_META = {
 const metaOf = (p) => PROGRAM_META[p] || { color: "#94A3B8", avatar: "" };
 
 /* =====================================================================
-   PARSER CSV (tanpa library) + helper angka
+   HELPERS
    ===================================================================== */
 
 function parseCSV(text) {
@@ -52,27 +49,46 @@ function parseCSV(text) {
   return rows;
 }
 
-// Bersihkan angka: buang "Rp", spasi, pemisah ribuan; aman utk locale.
 function num(v) {
   if (v == null || v === "") return 0;
   const s = String(v).trim().replace(/[^0-9.,-]/g, "");
-  // kalau ada koma & titik -> anggap titik ribuan, koma desimal (locale ID)
   let clean = s;
   if (s.includes(",") && s.includes(".")) clean = s.replace(/\./g, "").replace(",", ".");
   else if (s.includes(",") && !s.includes(".")) clean = s.replace(",", ".");
   const n = parseFloat(clean);
   return isNaN(n) ? 0 : n;
 }
-const pct = (x) => `${Math.round(num(x) * 100)}%`;
-const rupiah = (x) =>
-  "Rp " + Math.round(num(x)).toLocaleString("id-ID");
+
+// Persen pintar: kalau angka <=1.5, anggap desimal (0.33 -> 33%). Kalau >1.5, anggap sudah dalam persen (3.3 -> 3%).
+function pct(x) {
+  const n = num(x);
+  const v = Math.abs(n) <= 1.5 ? n * 100 : n;
+  return `${Math.round(v)}%`;
+}
+const rupiah = (x) => "Rp " + Math.round(num(x)).toLocaleString("id-ID");
 const truthy = (v) => /^(true|ya|yes|1|done|selesai)$/i.test(String(v).trim());
 
-const SECTIONS = [
-  "PERFORMA_TIM", "PAPAN_PERFORMA", "KALDIK_EVENTS",
-  "CASHFLOW_BULAN", "TOP_COMMITMENT", "PESERTA_AKTIF_RINGKASAN",
-  "WEEKLY_LEADER",
-];
+// Section name -> nama bucket di state. Pakai alias karena nama section kadang ke-truncate di Sheets.
+const SECTION_KEY = {
+  PERFORMA_TIM: "performaTim",
+  PAPAN_PERFORMA: "papan",
+  KALDIK_EVENTS: "kaldik",
+  CASHFLOW_BULAN: "cashflow",
+  TOP_COMMITMENT: "commitment",
+  PESERTA_AKTIF_RINGKASAN: "pesertaAktif",
+  PESERTA_AKTIF_RINGKA: "pesertaAktif",
+  PESERTA_AKTIF: "pesertaAktif",
+  WEEKLY_LEADER: "weekly",
+  PERFORMANCE_APPRAISAL: "appraisal",
+};
+
+// Section header = string ALL_CAPS_UNDERSCORE di kolom A, semua kolom lain kosong.
+function isSectionHeader(rowVals) {
+  const a = (rowVals[0] || "").trim();
+  if (!a) return false;
+  if (!/^[A-Z][A-Z0-9_]+$/.test(a)) return false;
+  return rowVals.slice(1).every((x) => !x || !String(x).trim());
+}
 
 function shapeData(rows) {
   const meta = {};
@@ -80,12 +96,22 @@ function shapeData(rows) {
   let section = null, sub = null;
 
   for (const r of rows) {
+    if (isSectionHeader(r)) {
+      const a = r[0].trim();
+      const key = SECTION_KEY[a] || a.toLowerCase();
+      section = key;
+      sub = null;
+      buckets[key] = buckets[key] || [];
+      continue;
+    }
     const a = (r[0] || "").trim();
-    if (SECTIONS.includes(a)) { section = a; sub = null; buckets[a] = []; continue; }
     if (a === "Header") { meta[(r[1] || "").trim()] = (r[2] || "").trim(); continue; }
     if (!section) continue;
-    if (!sub) { sub = r.map((x) => (x || "").trim()); continue; } // baris sub-header
-    if (r.every((x) => !x || !String(x).trim())) continue;        // baris kosong
+    if (!sub) {
+      sub = r.map((x) => (x || "").trim());
+      continue;
+    }
+    if (r.every((x) => !x || !String(x).trim())) continue;
     const obj = {};
     sub.forEach((key, idx) => { if (key) obj[key] = r[idx]; });
     buckets[section].push(obj);
@@ -94,47 +120,59 @@ function shapeData(rows) {
   return {
     periode: meta["Periode"] || "",
     pm: meta["PM"] || "",
-    performaTim: buckets["PERFORMA_TIM"] || [],
-    papan: buckets["PAPAN_PERFORMA"] || [],
-    kaldik: buckets["KALDIK_EVENTS"] || [],
-    cashflow: buckets["CASHFLOW_BULAN"] || [],
-    commitment: buckets["TOP_COMMITMENT"] || [],
-    pesertaAktif: buckets["PESERTA_AKTIF_RINGKASAN"] || [],
-    weekly: buckets["WEEKLY_LEADER"] || [],
+    performaTim: buckets.performaTim || [],
+    papan: buckets.papan || [],
+    kaldik: buckets.kaldik || [],
+    cashflow: buckets.cashflow || [],
+    commitment: buckets.commitment || [],
+    pesertaAktif: buckets.pesertaAktif || [],
+    weekly: buckets.weekly || [],
+    appraisal: buckets.appraisal || [],
   };
 }
 
 /* =====================================================================
-   DATA CONTOH (fallback) — hanya tampil saat CSV gagal di-fetch (preview).
-   Saat dideploy dengan CSV_URL benar, data live otomatis menimpa ini.
+   SAMPLE (preview saat CSV gagal)
    ===================================================================== */
 const SAMPLE = {
   periode: "Juni 2026", pm: "Ghina",
   performaTim: [
-    { Program:"DBE",DUT:17,DUR:3,UjianT:28,UjianR:6,BiayaT:93000000,BiayaR:69546188,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.49,Status:"Kritis" },
-    { Program:"MMBA",DUT:20,DUR:8,UjianT:32,UjianR:9,BiayaT:171000000,BiayaR:156430000,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.55,Status:"Aman" },
-    { Program:"SIC",DUT:17,DUR:6,UjianT:30,UjianR:5,BiayaT:92500000,BiayaR:49200000,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.41,Status:"Waspada" },
-    { Program:"DBS",DUT:13,DUR:4,UjianT:18,UjianR:3,BiayaT:32500000,BiayaR:27200000,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.46,Status:"Waspada" },
-    { Program:"Brevet",DUT:8,DUR:2,UjianT:10,UjianR:1,BiayaT:54000000,BiayaR:12250000,SIS:0.87,Rapot:0,Kaldik:0.33,Skor:0.28,Status:"Kritis" },
-    { Program:"CCC",DUT:0,DUR:0,UjianT:0,UjianR:0,BiayaT:0,BiayaR:0,SIS:0,Rapot:0,Kaldik:0,Skor:0,Status:"-" },
+    { Program:"DBE",LeadsT:0,LeadsR:0,IntT:0,IntR:0,DUT:17,DUR:3,UjianT:28,UjianR:6,BiayaT:93000000,BiayaR:69546188,SIS:0.87,Status:"Kritis" },
+    { Program:"MMBA",LeadsT:0,LeadsR:0,IntT:0,IntR:0,DUT:20,DUR:8,UjianT:32,UjianR:9,BiayaT:171000000,BiayaR:156430000,SIS:0.87,Status:"Aman" },
+    { Program:"SIC",LeadsT:0,LeadsR:0,IntT:0,IntR:0,DUT:17,DUR:6,UjianT:30,UjianR:5,BiayaT:92500000,BiayaR:49200000,SIS:0.87,Status:"Waspada" },
+    { Program:"DBS",LeadsT:0,LeadsR:0,IntT:0,IntR:0,DUT:13,DUR:4,UjianT:18,UjianR:3,BiayaT:32500000,BiayaR:27200000,SIS:0.87,Status:"Waspada" },
+    { Program:"Brevet",LeadsT:0,LeadsR:0,IntT:0,IntR:0,DUT:8,DUR:2,UjianT:10,UjianR:1,BiayaT:54000000,BiayaR:12250000,SIS:0.87,Status:"Kritis" },
+    { Program:"CCC",LeadsT:0,LeadsR:0,IntT:0,IntR:0,DUT:0,DUR:0,UjianT:0,UjianR:0,BiayaT:0,BiayaR:0,SIS:0,Status:"-" },
   ],
   papan: [
-    { Program:"DBE",KPI:"Daftar Ujian",Pct:0.21 },{ Program:"MMBA",KPI:"Daftar Ujian",Pct:0.28 },
-    { Program:"SIC",KPI:"Daftar Ujian",Pct:0.17 },{ Program:"DBS",KPI:"Daftar Ujian",Pct:0.16 },
-    { Program:"Brevet",KPI:"Daftar Ujian",Pct:0.10 },{ Program:"CCC",KPI:"Daftar Ujian",Pct:0 },
-    { Program:"DBE",KPI:"Daftar Ulang",Pct:0.18 },{ Program:"MMBA",KPI:"Daftar Ulang",Pct:0.40 },
-    { Program:"SIC",KPI:"Daftar Ulang",Pct:0.35 },{ Program:"DBS",KPI:"Daftar Ulang",Pct:0.31 },
-    { Program:"Brevet",KPI:"Daftar Ulang",Pct:0.25 },{ Program:"CCC",KPI:"Daftar Ulang",Pct:0 },
+    { Program:"DBE",KPI:"Daftar Ujian",W1:0.05,W2:0.10,W3:0.15,W4:0.18,W5:0.21 },
+    { Program:"MMBA",KPI:"Daftar Ujian",W1:0.04,W2:0.08,W3:0.16,W4:0.22,W5:0.28 },
+    { Program:"SIC",KPI:"Daftar Ujian",W1:0.02,W2:0.06,W3:0.10,W4:0.14,W5:0.17 },
+    { Program:"DBS",KPI:"Daftar Ujian",W1:0.03,W2:0.07,W3:0.11,W4:0.13,W5:0.16 },
+    { Program:"Brevet",KPI:"Daftar Ujian",W1:0.01,W2:0.04,W3:0.06,W4:0.08,W5:0.10 },
+    { Program:"DBE",KPI:"Daftar Ulang",W1:0.02,W2:0.06,W3:0.12,W4:0.15,W5:0.18 },
+    { Program:"MMBA",KPI:"Daftar Ulang",W1:0.05,W2:0.12,W3:0.22,W4:0.31,W5:0.40 },
+    { Program:"SIC",KPI:"Daftar Ulang",W1:0.04,W2:0.10,W3:0.20,W4:0.28,W5:0.35 },
+    { Program:"DBS",KPI:"Daftar Ulang",W1:0.03,W2:0.08,W3:0.18,W4:0.25,W5:0.31 },
+    { Program:"Brevet",KPI:"Daftar Ulang",W1:0.02,W2:0.06,W3:0.12,W4:0.18,W5:0.25 },
+    { Program:"DBE",KPI:"Leads",W1:0.10,W2:0.20,W3:0.30,W4:0.40,W5:0.50 },
+    { Program:"MMBA",KPI:"Leads",W1:0.15,W2:0.25,W3:0.35,W4:0.45,W5:0.55 },
+    { Program:"SIC",KPI:"Leads",W1:0.08,W2:0.18,W3:0.28,W4:0.38,W5:0.48 },
+    { Program:"DBE",KPI:"Interview",W1:0.05,W2:0.12,W3:0.20,W4:0.28,W5:0.35 },
+    { Program:"MMBA",KPI:"Interview",W1:0.08,W2:0.18,W3:0.28,W4:0.38,W5:0.48 },
   ],
   kaldik: [
     { Tanggal:6,Program:"MMBA",Judul:"Asesmen CRA",Done:"True" },
     { Tanggal:20,Program:"DBE",Judul:"Orientasi",Done:"False" },
     { Tanggal:20,Program:"SIC",Judul:"Graduation",Done:"False" },
+    { Tanggal:12,Program:"DBS",Judul:"Workshop Brand",Done:"True" },
+    { Tanggal:25,Program:"Brevet",Judul:"Closing Batch",Done:"False" },
   ],
   cashflow: [{ Key:"Plan",Value:120000000 },{ Key:"Reality",Value:95000000 }],
   commitment: [
     { Judul:"Performance Tracking Board (minggu depan jadi)",Status:"URGENT",Deadline:"25/06/2026" },
     { Judul:"Pengisian Asertif (Deadline 25 Juni)",Status:"URGENT",Deadline:"30/06/2026" },
+    { Judul:"Sosialisasi Presensi WHT",Status:"Selesai",Deadline:"13/06/2026" },
     { Judul:"Buat aturan reward & share ke group",Status:"URGENT",Deadline:"25/06/2026" },
   ],
   pesertaAktif: [
@@ -144,18 +182,19 @@ const SAMPLE = {
     { Batch:"DBS-3",Program:"DBS",Target:13,Aktif:12,Mundur:1,SudahBayar:9,BelumBayar:3,BayarPct:0.75 },
     { Batch:"Brevet-2",Program:"Brevet",Target:27,Aktif:11,Mundur:0,SudahBayar:6,BelumBayar:5,BayarPct:0.22 },
   ],
-  weekly: [
-    { Week:"W1",KPI:"Daftar Ujian",Program:"DBE",Pct:0.12 },{ Week:"W2",KPI:"Daftar Ujian",Program:"Brevet",Pct:0.15 },
-    { Week:"W3",KPI:"Daftar Ujian",Program:"DBS",Pct:0.11 },{ Week:"W4",KPI:"Daftar Ujian",Program:"DBE",Pct:0.18 },
-    { Week:"W5",KPI:"Daftar Ujian",Program:"MMBA",Pct:0.20 },
-    { Week:"W1",KPI:"Daftar Ulang",Program:"MMBA",Pct:0.10 },{ Week:"W2",KPI:"Daftar Ulang",Program:"SIC",Pct:0.14 },
-    { Week:"W3",KPI:"Daftar Ulang",Program:"DBS",Pct:0.12 },{ Week:"W4",KPI:"Daftar Ulang",Program:"MMBA",Pct:0.16 },
-    { Week:"W5",KPI:"Daftar Ulang",Program:"DBE",Pct:0.09 },
+  weekly: [],
+  appraisal: [
+    { Tier:"WIG",Indikator:"Peserta Aktif",Bobot:"",Skor:"" },
+    { Tier:"LM",Indikator:"Daftar Ulang",Bobot:"",Skor:"" },
+    { Tier:"LM",Indikator:"Daftar Ujian",Bobot:"",Skor:"" },
+    { Tier:"LM",Indikator:"Cashflow",Bobot:"",Skor:"" },
+    { Tier:"DLM",Indikator:"Rapot",Bobot:"",Skor:"" },
+    { Tier:"DLM",Indikator:"Kaldik",Bobot:"",Skor:"" },
   ],
 };
 
 /* =====================================================================
-   IKON (inline SVG, tanpa library)
+   IKON
    ===================================================================== */
 const Crown = ({ size = 18, color = "#E8A317" }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill={color} aria-hidden>
@@ -164,9 +203,8 @@ const Crown = ({ size = 18, color = "#E8A317" }) => (
 );
 
 /* =====================================================================
-   KOMPONEN
+   AVATAR
    ===================================================================== */
-
 function Avatar({ program, size = 34 }) {
   const m = metaOf(program);
   const [broken, setBroken] = useState(false);
@@ -177,12 +215,15 @@ function Avatar({ program, size = 34 }) {
   }
   return (
     <span className="pm-ava pm-ava--init"
-      style={{ width: size, height: size, background: m.color }}>
-      {program.slice(0, 2).toUpperCase()}
+      style={{ width: size, height: size, background: m.color, fontSize: size * 0.32 }}>
+      {(program || "?").slice(0, 2).toUpperCase()}
     </span>
   );
 }
 
+/* =====================================================================
+   HERO
+   ===================================================================== */
 function Hero({ periode, pm }) {
   return (
     <header className="pm-hero" style={HERO_IMAGE ? { backgroundImage: `url(${HERO_IMAGE})` } : undefined}>
@@ -200,47 +241,83 @@ function Hero({ periode, pm }) {
   );
 }
 
-const statusTone = (s = "") => {
-  const t = s.toLowerCase();
-  if (t.includes("kritis")) return "crit";
-  if (t.includes("waspada")) return "warn";
-  if (t.includes("aman")) return "ok";
-  return "muted";
-};
+/* =====================================================================
+   SUMMARY CARDS (di atas Performa Tim)
+   ===================================================================== */
+function SummaryCards({ data }) {
+  const programs = (data.performaTim || []).filter((r) => r.Program && (r.Status || "").trim() !== "-");
 
-/* ----- A. PERFORMA TIM (tabel dikelompokkan per kategori T/R) ----- */
-function PerformaTim({ rows }) {
-  const groups = [
-    { key: "DU", label: "Daftar Ulang", t: "DUT", r: "DUR", kind: "count" },
-    { key: "DJ", label: "Daftar Ujian", t: "UjianT", r: "UjianR", kind: "count" },
-    { key: "BY", label: "Biaya Pendidikan", t: "BiayaT", r: "BiayaR", kind: "money" },
+  // Performance Appraisal: weighted average pakai bobot dari section appraisal
+  const pa = data.appraisal || [];
+  const totalBobot = pa.reduce((s, r) => s + num(r.Bobot), 0);
+  const weighted = pa.reduce((s, r) => s + num(r.Bobot) * num(r.Skor), 0);
+  const paScore = totalBobot > 0 ? weighted / totalBobot : null;
+
+  // Kaldik
+  const kaldikDone = (data.kaldik || []).filter((e) => truthy(e.Done)).length;
+  const kaldikTotal = (data.kaldik || []).length;
+
+  // SIS rata-rata
+  const sisVals = programs.map((r) => num(r.SIS)).filter((v) => v > 0);
+  const sisAvg = sisVals.length ? sisVals.reduce((a, b) => a + b, 0) / sisVals.length : 0;
+
+  const cards = [
+    { label: "Program Dimonitor", value: programs.length, sub: "program aktif", tone: "ink" },
+    { label: "Skor Performance Appraisal", value: paScore != null ? pct(paScore) : "—",
+      sub: totalBobot > 0 ? `bobot ${pct(totalBobot)} terkonfigurasi` : "bobot belum diisi di sheet 90", tone: "violet" },
+    { label: "Kaldik", value: kaldikTotal ? `${kaldikDone}/${kaldikTotal}` : "—",
+      sub: kaldikTotal ? `${pct(kaldikDone / kaldikTotal)} terlaksana` : "belum ada agenda", tone: "teal" },
+    { label: "SIS Rata-rata", value: sisAvg ? pct(sisAvg) : "—", sub: "kepatuhan WHT", tone: "gold" },
   ];
-  const single = [
-    { key: "SIS", label: "SIS" }, { key: "Rapot", label: "Rapot" }, { key: "Kaldik", label: "Kaldik" },
-  ];
-  const fmt = (kind, v) => kind === "money" ? rupiah(v) : Math.round(num(v));
 
   return (
-    <Section letter="A" title="Performa Tim" caption="Target vs Realisasi per kategori">
+    <div className="pm-summary">
+      {cards.map((c) => (
+        <div key={c.label} className={`pm-summary__card pm-summary__card--${c.tone}`}>
+          <div className="pm-summary__value">{c.value}</div>
+          <div className="pm-summary__label">{c.label}</div>
+          <div className="pm-summary__sub">{c.sub}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* =====================================================================
+   A. PERFORMA TIM
+   ===================================================================== */
+function PerformaTim({ rows }) {
+  // Hanya 5 kategori, semua T|R. Hapus SIS/Rapot/Kaldik/Skor/Status.
+  const groups = [
+    { label: "Leads",         t: "LeadsT",  r: "LeadsR",  kind: "count" },
+    { label: "Interview",     t: "IntT",    r: "IntR",    kind: "count" },
+    { label: "Daftar Ujian",  t: "UjianT",  r: "UjianR",  kind: "count" },
+    { label: "Daftar Ulang",  t: "DUT",     r: "DUR",     kind: "count" },
+    { label: "Biaya",         t: "BiayaT",  r: "BiayaR",  kind: "money" },
+  ];
+  const fmt = (kind, v) => (v === "" || v == null) ? "—" : (kind === "money" ? rupiah(v) : Math.round(num(v)));
+
+  return (
+    <Section letter="A" title="Performa Tim" caption="Target vs Realisasi per kategori funnel">
       <div className="pm-tablewrap">
         <table className="pm-table">
           <thead>
             <tr className="pm-table__grouprow">
               <th rowSpan={2} className="pm-sticky">Program</th>
-              {groups.map((g) => <th key={g.key} colSpan={2} className="pm-grouphd">{g.label}</th>)}
-              {single.map((s) => <th key={s.key} rowSpan={2}>{s.label}</th>)}
-              <th rowSpan={2}>Skor</th>
-              <th rowSpan={2}>Status</th>
+              {groups.map((g) => <th key={g.label} colSpan={2} className="pm-grouphd">{g.label}</th>)}
             </tr>
             <tr className="pm-table__subrow">
               {groups.map((g) => (
-                <React.Fragment key={g.key}>
+                <React.Fragment key={g.label}>
                   <th className="pm-tr">Target</th><th className="pm-tr pm-tr--real">Realisasi</th>
                 </React.Fragment>
               ))}
             </tr>
           </thead>
           <tbody>
+            {rows.length === 0 && (
+              <tr><td className="pm-empty" colSpan={1 + groups.length * 2}>Belum ada data Performa Tim di export.</td></tr>
+            )}
             {rows.map((row) => (
               <tr key={row.Program}>
                 <td className="pm-sticky pm-prog">
@@ -248,14 +325,11 @@ function PerformaTim({ rows }) {
                   {row.Program}
                 </td>
                 {groups.map((g) => (
-                  <React.Fragment key={g.key}>
+                  <React.Fragment key={g.label}>
                     <td className="pm-tr">{fmt(g.kind, row[g.t])}</td>
                     <td className="pm-tr pm-tr--real">{fmt(g.kind, row[g.r])}</td>
                   </React.Fragment>
                 ))}
-                {single.map((s) => <td key={s.key}>{pct(row[s.key])}</td>)}
-                <td className="pm-skor">{pct(row.Skor)}</td>
-                <td><span className={`pm-badge pm-badge--${statusTone(row.Status)}`}>{row.Status || "—"}</span></td>
               </tr>
             ))}
           </tbody>
@@ -265,8 +339,20 @@ function PerformaTim({ rows }) {
   );
 }
 
-/* ----- B. PESERTA AKTIF (angkatan berjalan) ----- */
+/* =====================================================================
+   B. PESERTA AKTIF
+   ===================================================================== */
 function PesertaAktif({ rows }) {
+  if (!rows || rows.length === 0) {
+    return (
+      <Section letter="B" title="Peserta Aktif" caption="Angkatan berjalan tiap program">
+        <div className="pm-empty">
+          Belum ada data Peserta Aktif. Pastikan section <code>PESERTA_AKTIF_RINGKASAN</code> ada di tab 90 dan
+          baris sub-header berisi <code>Batch | Program | Target | Aktif | Mundur | SudahBayar | BelumBayar | BayarPct</code>.
+        </div>
+      </Section>
+    );
+  }
   return (
     <Section letter="B" title="Peserta Aktif" caption="Angkatan berjalan tiap program">
       <div className="pm-grid pm-grid--cards">
@@ -274,6 +360,7 @@ function PesertaAktif({ rows }) {
           const aktif = r.Aktif === "" || r.Aktif == null ? null : num(r.Aktif);
           const target = num(r.Target);
           const bayar = num(r.BayarPct);
+          const bayarVal = Math.abs(bayar) <= 1.5 ? bayar : bayar / 100;
           return (
             <div key={r.Batch} className="pm-card">
               <div className="pm-card__head">
@@ -286,12 +373,12 @@ function PesertaAktif({ rows }) {
               </div>
               <div className="pm-bar pm-bar--thin">
                 <div className="pm-bar__fill" style={{
-                  width: `${Math.min(100, bayar * 100)}%`,
+                  width: `${Math.min(100, bayarVal * 100)}%`,
                   background: metaOf(r.Program).color,
                 }} />
               </div>
               <div className="pm-card__stats">
-                <span>Sudah bayar <b>{num(r.SudahBayar)}</b></span>
+                <span>Bayar <b>{num(r.SudahBayar)}</b></span>
                 <span>Belum <b>{num(r.BelumBayar)}</b></span>
                 <span>Mundur <b>{num(r.Mundur)}</b></span>
                 <span className="pm-card__pct">{pct(r.BayarPct)} bayar</span>
@@ -304,31 +391,100 @@ function PesertaAktif({ rows }) {
   );
 }
 
-/* ----- C. KALDIK CHECKLIST ----- */
+/* =====================================================================
+   C. KALDIK CHECKLIST (gaya lingkaran)
+   ===================================================================== */
 function KaldikChecklist({ rows }) {
   const sorted = [...rows].sort((a, b) => num(a.Tanggal) - num(b.Tanggal));
   return (
     <Section letter="C" title="Kaldik Checklist" caption="Agenda kalender akademik bulan ini">
-      <ul className="pm-checklist">
-        {sorted.length === 0 && <li className="pm-empty">Belum ada agenda bulan ini.</li>}
+      {sorted.length === 0 && <div className="pm-empty">Belum ada agenda bulan ini.</div>}
+      <div className="pm-kal-row">
         {sorted.map((e, i) => {
           const done = truthy(e.Done);
+          const color = metaOf(e.Program).color;
           return (
-            <li key={i} className={`pm-check ${done ? "is-done" : ""}`}>
-              <span className="pm-check__box">{done ? "✓" : ""}</span>
-              <span className="pm-check__date">{num(e.Tanggal)}</span>
-              <span className="pm-chip" style={{ background: metaOf(e.Program).color }} />
-              <span className="pm-check__prog">{e.Program}</span>
-              <span className="pm-check__title">{e.Judul}</span>
-            </li>
+            <div key={i} className={`pm-kal-item ${done ? "is-done" : ""}`}>
+              <div className="pm-kal-circle" style={{ borderColor: color, color: done ? "#fff" : color, background: done ? color : "#fff" }}>
+                <span className="pm-kal-num">{num(e.Tanggal)}</span>
+                {done && <span className="pm-kal-check">✓</span>}
+              </div>
+              <div className="pm-kal-prog" style={{ color }}>{e.Program}</div>
+              <div className="pm-kal-title">{e.Judul}</div>
+            </div>
           );
         })}
-      </ul>
+      </div>
     </Section>
   );
 }
 
-/* ----- D. EFISIENSI CASHOUT ----- */
+/* =====================================================================
+   KALDIK CALENDAR (tab tersendiri)
+   ===================================================================== */
+const MONTHS_ID = ["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
+
+function KaldikCalendar({ rows, periode }) {
+  const [mName, yStr] = (periode || "").split(" ");
+  const month = MONTHS_ID.indexOf(mName);
+  const year = parseInt(yStr) || new Date().getFullYear();
+  if (month < 0) {
+    return <Section letter="" title="Kaldik Kalender">
+      <div className="pm-empty">Periode tidak valid: <code>{periode || "(kosong)"}</code>. Format yang diharapkan: <code>Juni 2026</code>.</div>
+    </Section>;
+  }
+
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const byDay = {};
+  (rows || []).forEach((e) => {
+    const d = num(e.Tanggal);
+    if (d > 0) (byDay[d] = byDay[d] || []).push(e);
+  });
+
+  const cells = [];
+  for (let i = 0; i < firstDay; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const dayNames = ["Min", "Sen", "Sel", "Rab", "Kam", "Jum", "Sab"];
+
+  return (
+    <Section letter="" title={`Kaldik · ${mName} ${year}`} caption="Kalender akademik bulanan">
+      <div className="pm-cal">
+        <div className="pm-cal__head">
+          {dayNames.map((d, i) => <div key={d} className={`pm-cal__hd ${i === 0 ? "is-sun" : ""}`}>{d}</div>)}
+        </div>
+        <div className="pm-cal__grid">
+          {cells.map((d, i) => (
+            <div key={i} className={`pm-cal__cell ${d == null ? "is-empty" : ""} ${i % 7 === 0 && d != null ? "is-sun" : ""}`}>
+              {d != null && (
+                <>
+                  <div className="pm-cal__num">{d}</div>
+                  <div className="pm-cal__events">
+                    {(byDay[d] || []).map((e, j) => (
+                      <div key={j} className={`pm-cal__event ${truthy(e.Done) ? "is-done" : ""}`}
+                        style={{ borderLeftColor: metaOf(e.Program).color }}
+                        title={`${e.Program}: ${e.Judul}`}>
+                        <span className="pm-cal__prog" style={{ color: metaOf(e.Program).color }}>{e.Program}</span>
+                        <span className="pm-cal__title">{e.Judul}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+/* =====================================================================
+   D. EFISIENSI CASHOUT
+   ===================================================================== */
 function CashoutEfisiensi({ rows }) {
   const get = (k) => num((rows.find((r) => (r.Key || "").toLowerCase() === k) || {}).Value);
   const plan = get("plan"), reality = get("reality");
@@ -345,7 +501,7 @@ function CashoutEfisiensi({ rows }) {
       </div>
       <div className="pm-bar pm-bar--cash">
         <div className="pm-bar__fill" style={{
-          width: `${Math.min(100, eff * 100)}%`,
+          width: `${Math.min(100, Math.abs(eff) <= 1.5 ? eff * 100 : eff)}%`,
           background: over ? "#E5484D" : "#0E9F8E",
         }} />
         <span className="pm-bar__mid">{pct(eff)} terpakai dari plan</span>
@@ -354,13 +510,16 @@ function CashoutEfisiensi({ rows }) {
   );
 }
 
-/* ----- E. KOMITMEN URGENT ----- */
+/* =====================================================================
+   E. KOMITMEN URGENT (FILTER URGENT ONLY)
+   ===================================================================== */
 function KomitmenUrgent({ rows }) {
+  const filtered = (rows || []).filter((c) => /urgent/i.test(c.Status || ""));
   return (
     <Section letter="E" title="Komitmen Urgent" caption="Yang harus dieksekusi paling dulu">
       <div className="pm-urgent">
-        {rows.length === 0 && <div className="pm-empty">Tidak ada komitmen urgent. 🎉</div>}
-        {rows.map((c, i) => (
+        {filtered.length === 0 && <div className="pm-empty">Tidak ada komitmen urgent. 🎉</div>}
+        {filtered.map((c, i) => (
           <div key={i} className="pm-urgent__item">
             <span className="pm-urgent__flag">URGENT</span>
             <span className="pm-urgent__title">{c.Judul}</span>
@@ -372,24 +531,34 @@ function KomitmenUrgent({ rows }) {
   );
 }
 
-/* ----- PAPAN PERFORMA (racing lanes + history mingguan) ----- */
+/* =====================================================================
+   PAPAN PERFORMA (per-minggu, KPI: Leads/Int/DJ/DU)
+   ===================================================================== */
 function PapanPerforma({ papan, weekly }) {
-  const kpis = ["Daftar Ujian", "Daftar Ulang"];
+  const kpis = ["Leads", "Interview", "Daftar Ujian", "Daftar Ulang"];
   const [kpi, setKpi] = useState("Daftar Ujian");
+  const [week, setWeek] = useState("W1");
   const [mounted, setMounted] = useState(false);
   useEffect(() => { const t = setTimeout(() => setMounted(true), 60); return () => clearTimeout(t); }, []);
 
+  // Format: cek apakah ada kolom W1..W5
+  const hasWeekly = papan.length > 0 && (papan[0].W1 !== undefined || papan[0].W2 !== undefined);
+  const weekOpts = hasWeekly ? ["W1", "W2", "W3", "W4", "W5"] : [];
+
   const lanes = useMemo(() => {
-    const list = papan.filter((r) => (r.KPI || "").trim() === kpi)
-      .map((r) => ({ program: r.Program, pct: num(r.Pct) }))
-      .sort((a, b) => b.pct - a.pct);
-    return list;
-  }, [papan, kpi]);
-  const max = Math.max(0.0001, ...lanes.map((l) => l.pct));
+    const filtered = papan.filter((r) => (r.KPI || "").trim() === kpi);
+    const out = filtered.map((r) => ({
+      program: r.Program,
+      pct: hasWeekly ? num(r[week]) : num(r.Pct),
+    }));
+    return out.sort((a, b) => b.pct - a.pct);
+  }, [papan, kpi, week, hasWeekly]);
+
+  const maxPct = Math.max(0.0001, ...lanes.map((l) => Math.abs(l.pct) <= 1.5 ? l.pct : l.pct / 100));
   const leader = lanes[0]?.program;
 
   return (
-    <Section letter="" title="Papan Performa" caption="Balapan capaian antar program">
+    <Section letter="" title="Papan Performa" caption={hasWeekly ? `Capaian per minggu · ${week}` : "Capaian per program"}>
       <div className="pm-kpitoggle">
         {kpis.map((k) => (
           <button key={k} className={`pm-toggle ${kpi === k ? "is-active" : ""}`}
@@ -397,10 +566,21 @@ function PapanPerforma({ papan, weekly }) {
         ))}
       </div>
 
+      {hasWeekly && (
+        <div className="pm-weekselect">
+          <span className="pm-weekselect__label">Minggu</span>
+          {weekOpts.map((w) => (
+            <button key={w} className={`pm-weekbtn ${week === w ? "is-active" : ""}`}
+              onClick={() => setWeek(w)}>{w}</button>
+          ))}
+        </div>
+      )}
+
       <div className="pm-track">
         {lanes.map((l, i) => {
-          const w = mounted ? Math.max(8, (l.pct / max) * 100) : 8;
-          const isLead = l.program === leader && l.pct > 0;
+          const v = Math.abs(l.pct) <= 1.5 ? l.pct : l.pct / 100;
+          const w = mounted ? Math.max(8, (v / maxPct) * 100) : 8;
+          const isLead = l.program === leader && v > 0;
           return (
             <div key={l.program} className="pm-lane">
               <div className="pm-lane__rank">{i + 1}</div>
@@ -417,7 +597,7 @@ function PapanPerforma({ papan, weekly }) {
             </div>
           );
         })}
-        {lanes.length === 0 && <div className="pm-empty">Belum ada data untuk {kpi}.</div>}
+        {lanes.length === 0 && <div className="pm-empty">Belum ada data untuk {kpi}{hasWeekly ? ` (${week})` : ""}.</div>}
       </div>
 
       <WeeklyHistory weekly={weekly} />
@@ -429,7 +609,7 @@ function WeeklyHistory({ weekly }) {
   const build = (kpi) => {
     const wk = weekly.filter((r) => (r.KPI || "").trim() === kpi)
       .map((r) => ({ week: r.Week, program: r.Program, pct: num(r.Pct) }))
-      .sort((a, b) => a.week.localeCompare(b.week));
+      .sort((a, b) => (a.week || "").localeCompare(b.week || ""));
     const tally = {};
     wk.forEach((w) => { if (w.program) tally[w.program] = (tally[w.program] || 0) + 1; });
     const champ = Object.entries(tally).sort((a, b) => b[1] - a[1])[0];
@@ -439,13 +619,10 @@ function WeeklyHistory({ weekly }) {
     { kpi: "Daftar Ujian", ...build("Daftar Ujian") },
     { kpi: "Daftar Ulang", ...build("Daftar Ulang") },
   ];
-  if (weekly.length === 0) {
+  if (!weekly || weekly.length === 0) {
     return (
       <div className="pm-weekly pm-weekly--empty">
-        <div className="pm-empty">
-          History mingguan belum tersedia. Tambahkan section <code>WEEKLY_LEADER</code> di tab
-          90_EXPORT_DASHBOARD (lihat catatan dari Claude).
-        </div>
+        <div className="pm-empty">History mingguan belum tersedia. Isi section <code>WEEKLY_LEADER</code> di tab 90.</div>
       </div>
     );
   }
@@ -479,7 +656,9 @@ function WeeklyHistory({ weekly }) {
   );
 }
 
-/* ----- primitif ----- */
+/* =====================================================================
+   PRIMITIF
+   ===================================================================== */
 function Section({ letter, title, caption, children }) {
   return (
     <section className="pm-section">
@@ -511,17 +690,29 @@ export default function App() {
   const [data, setData] = useState(null);
   const [tab, setTab] = useState("dashboard");
   const [live, setLive] = useState(false);
+  const [fetchErr, setFetchErr] = useState("");
 
   useEffect(() => {
     let alive = true;
+    if (CSV_URL.includes("GANTI_DENGAN_PUB_ID")) {
+      setFetchErr("CSV_URL belum diganti di App.jsx baris ~12. Tempel URL publish-to-web milikmu.");
+      setData(SAMPLE);
+      return;
+    }
     fetch(CSV_URL)
-      .then((r) => { if (!r.ok) throw new Error("fetch"); return r.text(); })
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
+        return r.text();
+      })
       .then((t) => {
-        if (!t || t.includes("<html")) throw new Error("not csv");
+        if (!t) throw new Error("Respons kosong");
+        if (t.trim().toLowerCase().startsWith("<")) {
+          throw new Error("URL mengembalikan HTML, bukan CSV. Pastikan link adalah /pub?...&output=csv (bukan /edit?...). Cara: File → Bagikan → Publikasikan ke web → pilih tab 90 → format CSV.");
+        }
         const shaped = shapeData(parseCSV(t));
         if (alive) { setData(shaped); setLive(true); }
       })
-      .catch(() => { if (alive) setData(SAMPLE); });
+      .catch((err) => { if (alive) { setData(SAMPLE); setFetchErr(err.message || String(err)); } });
     return () => { alive = false; };
   }, []);
 
@@ -531,34 +722,41 @@ export default function App() {
     <div className="pm-root">
       <StyleTag />
       <Hero periode={data.periode} pm={data.pm} />
-      {!live && <div className="pm-banner">Mode pratinjau (data contoh). Ganti <code>CSV_URL</code> untuk data live.</div>}
+
+      {!live && (
+        <div className="pm-banner">
+          <b>Data contoh ditampilkan.</b> {fetchErr}
+        </div>
+      )}
 
       <nav className="pm-tabs">
-        <button className={tab === "dashboard" ? "is-active" : ""} onClick={() => setTab("dashboard")}>Dashboard</button>
+        <button className={tab === "dashboard" ? "is-active" : ""} onClick={() => setTab("dashboard")}>Overview</button>
         <button className={tab === "papan" ? "is-active" : ""} onClick={() => setTab("papan")}>Papan Performa</button>
+        <button className={tab === "kaldik" ? "is-active" : ""} onClick={() => setTab("kaldik")}>Kaldik</button>
       </nav>
 
       <main className="pm-main">
-        {tab === "dashboard" ? (
+        {tab === "dashboard" && (
           <>
+            <SummaryCards data={data} />
             <PerformaTim rows={data.performaTim} />
             <PesertaAktif rows={data.pesertaAktif} />
             <KaldikChecklist rows={data.kaldik} />
             <CashoutEfisiensi rows={data.cashflow} />
             <KomitmenUrgent rows={data.commitment} />
           </>
-        ) : (
-          <PapanPerforma papan={data.papan} weekly={data.weekly} />
         )}
+        {tab === "papan" && <PapanPerforma papan={data.papan} weekly={data.weekly} />}
+        {tab === "kaldik" && <KaldikCalendar rows={data.kaldik} periode={data.periode} />}
       </main>
 
-      <footer className="pm-footer">Scoreboard PM · {data.periode} · diperbarui otomatis dari Google Sheets</footer>
+      <footer className="pm-footer">Scoreboard PM · {data.periode || "—"} · diperbarui otomatis dari Google Sheets</footer>
     </div>
   );
 }
 
 /* =====================================================================
-   STYLE (di-inject sekali; plain CSS, tanpa Tailwind)
+   STYLE
    ===================================================================== */
 function StyleTag() {
   return <style dangerouslySetInnerHTML={{ __html: CSS }} />;
@@ -568,19 +766,19 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@600&display=swap');
 
 .pm-root{--ink:#14213D;--ink2:#3A4663;--line:#E4E8F0;--bg:#F2F4F8;--card:#fff;
-  --gold:#E8A317;--teal:#0E9F8E;--red:#E5484D;
+  --gold:#E8A317;--teal:#0E9F8E;--red:#E5484D;--violet:#8B5CF6;
   font-family:'Inter',system-ui,sans-serif;color:var(--ink);background:var(--bg);min-height:100vh;}
 *{box-sizing:border-box}
 .pm-loading{font-family:'Inter',sans-serif;padding:80px;text-align:center;color:#64748B}
-.pm-banner{max-width:1180px;margin:14px auto 0;padding:9px 16px;background:#FEF3C7;border:1px solid #FCD34D;
-  border-radius:10px;font-size:13px;color:#92400E}
+.pm-banner{max-width:1180px;margin:14px auto 0;padding:11px 16px;background:#FEF3C7;border:1px solid #FCD34D;
+  border-radius:10px;font-size:13px;color:#92400E;line-height:1.5}
 .pm-banner code,.pm-empty code{background:#fff;padding:1px 6px;border-radius:5px;font-family:'JetBrains Mono',monospace;font-size:12px}
 
 /* HERO */
-.pm-hero{position:relative;min-height:230px;background:linear-gradient(135deg,#14213D,#22386b 60%,#2D6CDF);
+.pm-hero{position:relative;min-height:260px;background:linear-gradient(135deg,#14213D,#22386b 60%,#2D6CDF);
   background-size:cover;background-position:center;display:flex;align-items:flex-end;overflow:hidden}
-.pm-hero__scrim{position:absolute;inset:0;background:linear-gradient(180deg,rgba(11,18,38,.25),rgba(11,18,38,.82))}
-.pm-hero__inner{position:relative;max-width:1180px;width:100%;margin:0 auto;padding:30px 24px 26px}
+.pm-hero__scrim{position:absolute;inset:0;background:linear-gradient(180deg,rgba(11,18,38,.3),rgba(11,18,38,.85))}
+.pm-hero__inner{position:relative;max-width:1180px;width:100%;margin:0 auto;padding:32px 24px 28px}
 .pm-eyebrow{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#9DB4E8;font-weight:600}
 .pm-hero__title{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;color:#fff;
   font-size:clamp(28px,4.4vw,46px);margin:8px 0 10px;line-height:1.02;letter-spacing:-.02em}
@@ -596,6 +794,22 @@ const CSS = `
 .pm-tabs button.is-active{background:var(--ink);color:#fff;border-color:var(--ink)}
 
 .pm-main{max-width:1180px;margin:0 auto;padding:8px 24px 10px}
+
+/* SUMMARY CARDS */
+.pm-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:18px}
+.pm-summary__card{background:#fff;border:1px solid var(--line);border-radius:16px;padding:18px 20px;position:relative;overflow:hidden}
+.pm-summary__card::before{content:"";position:absolute;top:0;left:0;width:5px;height:100%}
+.pm-summary__card--ink::before{background:var(--ink)}
+.pm-summary__card--violet::before{background:var(--violet)}
+.pm-summary__card--teal::before{background:var(--teal)}
+.pm-summary__card--gold::before{background:var(--gold)}
+.pm-summary__value{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;font-size:32px;line-height:1;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.pm-summary__card--ink .pm-summary__value{color:var(--ink)}
+.pm-summary__card--violet .pm-summary__value{color:var(--violet)}
+.pm-summary__card--teal .pm-summary__value{color:var(--teal)}
+.pm-summary__card--gold .pm-summary__value{color:var(--gold)}
+.pm-summary__label{margin-top:8px;font-size:12px;font-weight:700;color:var(--ink);text-transform:uppercase;letter-spacing:.04em}
+.pm-summary__sub{margin-top:3px;font-size:12px;color:#7C879F}
 
 /* SECTION */
 .pm-section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px 22px 24px;margin-top:18px;
@@ -623,12 +837,6 @@ const CSS = `
 .pm-table thead .pm-sticky{background:#F7F9FC}
 .pm-prog{font-weight:700;display:flex;align-items:center;gap:8px}
 .pm-chip{width:10px;height:10px;border-radius:3px;flex:none;display:inline-block}
-.pm-skor{font-weight:800;font-family:'Plus Jakarta Sans',sans-serif}
-.pm-badge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:20px;letter-spacing:.02em}
-.pm-badge--crit{background:#FDECEC;color:#C0392B}
-.pm-badge--warn{background:#FEF6E7;color:#B7791F}
-.pm-badge--ok{background:#E7F6F1;color:#0B7A66}
-.pm-badge--muted{background:#EEF1F6;color:#7C879F}
 
 /* CARDS / GRID */
 .pm-grid{display:grid;gap:14px}
@@ -659,17 +867,31 @@ const CSS = `
 .pm-stat--crit .pm-stat__value,.pm-stat--crit .pm-stat__hint{color:var(--red)}
 .pm-stat--ok .pm-stat__value,.pm-stat--ok .pm-stat__hint{color:var(--teal)}
 
-/* CHECKLIST */
-.pm-checklist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
-.pm-check{display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:11px;padding:10px 13px;font-size:14px}
-.pm-check.is-done{background:#F6FBF9;border-color:#CDEBE2}
-.pm-check__box{width:21px;height:21px;border-radius:6px;border:1.5px solid #CBD4E3;display:grid;place-items:center;
-  color:#fff;font-size:13px;font-weight:800;flex:none}
-.pm-check.is-done .pm-check__box{background:var(--teal);border-color:var(--teal)}
-.pm-check__date{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;width:26px;text-align:center}
-.pm-check__prog{font-weight:700;font-size:13px}
-.pm-check__title{color:var(--ink2)}
-.pm-check.is-done .pm-check__title{text-decoration:line-through;color:#9AA4B8}
+/* KALDIK CHECKLIST (lingkaran) */
+.pm-kal-row{display:flex;flex-wrap:wrap;gap:18px;padding:8px 0 2px}
+.pm-kal-item{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:96px;max-width:130px}
+.pm-kal-circle{width:54px;height:54px;border-radius:50%;border:2px solid;display:grid;place-items:center;font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;font-size:18px;position:relative}
+.pm-kal-item.is-done .pm-kal-num{opacity:.95}
+.pm-kal-check{position:absolute;bottom:-3px;right:-3px;background:var(--teal);color:#fff;width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-size:11px;border:2px solid #fff}
+.pm-kal-prog{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+.pm-kal-title{font-size:12px;color:var(--ink2);text-align:center;line-height:1.3}
+
+/* KALDIK CALENDAR */
+.pm-cal{border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#fff}
+.pm-cal__head{display:grid;grid-template-columns:repeat(7,1fr);background:#F7F9FC;border-bottom:1px solid var(--line)}
+.pm-cal__hd{padding:11px 8px;text-align:center;font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:12px;color:var(--ink2);letter-spacing:.04em;text-transform:uppercase}
+.pm-cal__hd.is-sun{color:var(--red)}
+.pm-cal__grid{display:grid;grid-template-columns:repeat(7,1fr);grid-auto-rows:minmax(96px,auto)}
+.pm-cal__cell{border-right:1px solid #EEF1F6;border-bottom:1px solid #EEF1F6;padding:8px;display:flex;flex-direction:column;gap:4px;background:#fff}
+.pm-cal__cell:nth-child(7n){border-right:none}
+.pm-cal__cell.is-empty{background:#FAFBFE}
+.pm-cal__num{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:14px;color:var(--ink)}
+.pm-cal__cell.is-sun .pm-cal__num{color:var(--red)}
+.pm-cal__events{display:flex;flex-direction:column;gap:3px}
+.pm-cal__event{display:flex;flex-direction:column;border-left:3px solid;padding:4px 6px;background:#F7F9FC;border-radius:0 6px 6px 0;font-size:11px;line-height:1.3}
+.pm-cal__event.is-done{opacity:.55;text-decoration:line-through}
+.pm-cal__prog{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+.pm-cal__title{color:var(--ink2)}
 
 /* URGENT */
 .pm-urgent{display:flex;flex-direction:column;gap:9px}
@@ -679,10 +901,14 @@ const CSS = `
 .pm-urgent__due{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:12px;color:#C0392B;flex:none}
 
 /* PAPAN PERFORMA */
-.pm-kpitoggle{display:flex;gap:8px;margin-bottom:20px}
+.pm-kpitoggle{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
 .pm-toggle{font-family:'Plus Jakarta Sans',sans-serif;font-weight:700;font-size:13px;border:1px solid var(--line);
   background:#fff;color:var(--ink2);padding:8px 16px;border-radius:9px;cursor:pointer}
 .pm-toggle.is-active{background:var(--ink);color:#fff;border-color:var(--ink)}
+.pm-weekselect{display:flex;align-items:center;gap:6px;margin-bottom:18px;padding:9px 13px;background:#F7F9FC;border-radius:10px;width:fit-content}
+.pm-weekselect__label{font-size:11px;font-weight:700;color:#8A93A8;text-transform:uppercase;letter-spacing:.06em;margin-right:4px}
+.pm-weekbtn{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:12px;border:none;background:transparent;color:var(--ink2);padding:5px 11px;border-radius:7px;cursor:pointer}
+.pm-weekbtn.is-active{background:var(--ink);color:#fff}
 .pm-track{display:flex;flex-direction:column;gap:16px;padding:8px 0 4px}
 .pm-lane{display:flex;align-items:center;gap:12px}
 .pm-lane__rank{font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;color:#B6C0D4;width:18px;text-align:center;flex:none}
@@ -716,15 +942,20 @@ const CSS = `
 
 /* AVATAR */
 .pm-ava{border-radius:50%;object-fit:cover;border:2px solid #fff;box-shadow:0 1px 4px rgba(20,33,61,.2)}
-.pm-ava--init{display:grid;place-items:center;color:#fff;font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;
-  font-size:11px;border:2px solid #fff}
-.pm-empty{color:#8A93A8;font-size:13px;padding:10px 2px}
+.pm-ava--init{display:grid;place-items:center;color:#fff;font-family:'Plus Jakarta Sans',sans-serif;font-weight:800;border:2px solid #fff}
+.pm-empty{color:#8A93A8;font-size:13px;padding:14px 6px;text-align:center}
 .pm-footer{max-width:1180px;margin:8px auto 0;padding:20px 24px 36px;color:#9AA4B8;font-size:12px;text-align:center}
 
+@media(max-width:960px){
+  .pm-summary{grid-template-columns:repeat(2,1fr)}
+}
 @media(max-width:720px){
   .pm-grid--3{grid-template-columns:1fr}
   .pm-weekly__cols{grid-template-columns:1fr}
   .pm-lane__name{width:50px;font-size:12px}
+  .pm-summary{grid-template-columns:1fr}
+  .pm-cal__grid{grid-auto-rows:minmax(72px,auto)}
+  .pm-cal__event{font-size:10px}
 }
 @media(prefers-reduced-motion:reduce){
   .pm-bar__fill,.pm-lane__fill,.pm-lane__runner{transition:none}
